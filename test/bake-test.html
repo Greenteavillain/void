@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>굽기 검증 — 그림이 안 바뀌었는가</title>
+<style>body{background:#111;color:#ddd;font:13px/1.7 ui-monospace,monospace;padding:20px}
+#svgsrc{position:fixed;left:-99999px;top:0;width:0;height:0;overflow:hidden;opacity:0}
+.ok{color:#6ee7a8}.bad{color:#e74865}h2{font-size:13px;color:#58c2e5;margin:16px 0 6px}</style></head>
+<body>
+<div id="out">검증 중… (SVG를 실제로 다시 샘플링하므로 2~3초 걸립니다)</div>
+<div id="svgsrc"></div>
+<script type="module">
+// ─────────────────────────────────────────────────────────────────────────────
+// art/points.bin 이 원본 SVG 샘플링과 **정확히 같은 그림**인지 증명한다.
+//
+// 굽기는 로딩을 2,250ms → 20ms 로 줄이는 최적화인데, 최적화가 그림을 바꿔버리면
+// 아무 의미가 없다. 그래서 옛 build()가 하던 계산을 여기서 그대로 다시 돌려
+// 좌표를 하나하나 대조한다. Float32 저장이라 반올림 손실이 없어야 정상 —
+// 즉 "비슷" 이 아니라 **비트 단위로 동일**해야 한다.
+// (원본이 이미 Float32Array에 담았으므로: `rx[idx] = px[idx] = pt.x`)
+//
+// SVG를 바꿔서 다시 구웠다면 이 페이지를 열어 통과하는지 확인할 것.
+// ─────────────────────────────────────────────────────────────────────────────
+const log = []; let pass = 0, fail = 0;
+const paint = () => document.getElementById('out').innerHTML =
+  `<b>${fail?`<span class="bad">${fail}건 실패</span>`:'<span class="ok">전체 통과</span>'}</b> — ${pass} pass / ${fail} fail<br><br>` + log.join('<br>');
+const ok = (n, c, d) => { c?pass++:fail++;
+  log.push(`<span class="${c?'ok':'bad'}">${c?'PASS':'FAIL'}</span> ${n}${d?`  <span style="color:#888">${d}</span>`:''}`); paint(); };
+const h2 = t => { log.push(`<h2>${t}</h2>`); paint(); };
+
+const SAMPLE_EVERY = 64, MIN_PTS = 12, MAX_PTS = 58;
+const CLASS_IDX = { 'cls-1': 0, 'cls-2': 1, 'cls-3': 2 };
+
+h2('원본 SVG를 옛 방식 그대로 다시 샘플링');
+const svgText = await (await fetch('../art/thread-field.svg')).text();
+document.getElementById('svgsrc').innerHTML = svgText;
+const paths = [...document.querySelectorAll('#svgsrc path')];
+
+const t0 = performance.now();
+const meta = [];
+let expTotal = 0;
+for (const p of paths) {
+  let len = 0;
+  try { len = p.getTotalLength(); } catch (e) { len = 0; }
+  if (!len || !isFinite(len)) continue;
+  let n = Math.max(MIN_PTS, Math.min(MAX_PTS, Math.round(len / SAMPLE_EVERY)));
+  meta.push({ el: p, len, n, cls: CLASS_IDX[p.getAttribute('class')] ?? 0 });
+  expTotal += n;
+}
+// 옛 코드와 똑같이 Float32Array 에 담는다 — 이게 원본이 실제로 보관하던 값이다
+const expX = new Float32Array(expTotal), expY = new Float32Array(expTotal);
+let i = 0;
+for (const m of meta) for (let j = 0; j < m.n; j++) {
+  const pt = m.el.getPointAtLength(m.len * j / m.n);
+  expX[i] = pt.x; expY[i] = pt.y; i++;
+}
+const resampleMs = performance.now() - t0;
+ok('SVG 재샘플링 완료', true, `획 ${meta.length}개 · 점 ${expTotal.toLocaleString()}개 · ${resampleMs.toFixed(0)}ms ← 이 시간이 로딩에서 사라진 것`);
+
+h2('구워둔 points.bin 과 대조');
+const buf = await (await fetch('../art/points.bin')).arrayBuffer();
+const dv = new DataView(buf);
+ok('매직 TFLD', String.fromCharCode(dv.getUint8(0),dv.getUint8(1),dv.getUint8(2),dv.getUint8(3)) === 'TFLD');
+const N = dv.getUint32(8, true), S = dv.getUint32(12, true);
+const HEAD = 28, SB = S * 8;
+ok('점 개수 일치', N === expTotal, `구운것 ${N.toLocaleString()} vs SVG ${expTotal.toLocaleString()}`);
+ok('획 개수 일치', S === meta.length, `구운것 ${S} vs SVG ${meta.length}`);
+ok('파일 크기 = 헤더 + 획 + 점', buf.byteLength === HEAD + SB + N * 8, `${buf.byteLength.toLocaleString()}b`);
+
+let cntBad = 0, clsBad = 0;
+for (let k = 0; k < Math.min(S, meta.length); k++) {
+  if (dv.getUint32(HEAD + k*8, true) !== meta[k].n) cntBad++;
+  if (dv.getUint32(HEAD + k*8 + 4, true) !== meta[k].cls) clsBad++;
+}
+ok('획마다 점 개수 일치', cntBad === 0, cntBad ? `${cntBad}개 획 불일치` : '');
+ok('획마다 색(cls) 일치 — 순서·색 교차가 그림의 일부다', clsBad === 0, clsBad ? `${clsBad}개 획 불일치` : '');
+
+const pts = new Float32Array(buf, HEAD + SB, N * 2);
+let exact = 0, maxErr = 0, firstBad = null;
+for (let k = 0; k < Math.min(N, expTotal); k++) {
+  const bx = pts[k*2], by = pts[k*2+1];
+  if (bx === expX[k] && by === expY[k]) exact++;
+  else {
+    const e = Math.max(Math.abs(bx - expX[k]), Math.abs(by - expY[k]));
+    if (e > maxErr) maxErr = e;
+    if (firstBad === null) firstBad = `#${k}: 구운것(${bx},${by}) vs SVG(${expX[k]},${expY[k]})`;
+  }
+}
+ok('★ 모든 점이 비트 단위로 동일 — 그림이 1픽셀도 안 바뀜',
+   exact === expTotal, `${exact.toLocaleString()} / ${expTotal.toLocaleString()} 일치` +
+   (exact !== expTotal ? ` · 최대오차 ${maxErr}` : '') + (firstBad ? ` · 첫 불일치 ${firstBad}` : ''));
+
+log.push('<br><b>— 검증 종료 —</b>'); paint();
+window.__bakeTest = { pass, fail, N, exact, resampleMs: Math.round(resampleMs) };
+</script>
+</body></html>

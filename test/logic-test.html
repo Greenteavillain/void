@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>hand-source 로직 검증</title>
+<style>body{background:#111;color:#ddd;font:13px/1.6 ui-monospace,monospace;padding:20px}
+.ok{color:#6ee7a8}.bad{color:#e74865}h2{font-size:13px;color:#58c2e5;margin:18px 0 6px}</style>
+</head>
+<body><div id="out">running…</div>
+<script type="module">
+// 카메라도 rAF도 없이 HandSource의 판단 로직만 결정론적으로 검증한다.
+// (검출은 이미 MediaPipe 공식 테스트 이미지로 따로 확인함 — 여기선 그 뒤의 전부)
+import { HandSource, TUNE, opennessOf, apparentSizeOf } from '../hand/hand-source.js';
+import { OneEuro } from '../hand/one-euro.js';
+
+const log = [];
+let pass = 0, fail = 0;
+const ok = (name, cond, detail) => {
+  (cond ? pass++ : fail++);
+  log.push(`<span class="${cond?'ok':'bad'}">${cond?'PASS':'FAIL'}</span> ${name}${detail?`  <span style="color:#888">${detail}</span>`:''}`);
+  paint();
+};
+const h2 = (t) => { log.push(`<h2>${t}</h2>`); paint(); };
+// 중간중간 그린다 — 어딘가에서 멈추면 어디까지 갔는지 보이도록
+const paint = () => {
+  document.getElementById('out').innerHTML =
+    `<b>${fail === 0 ? '<span class="ok">여기까지 전체 통과</span>' : `<span class="bad">${fail}건 실패</span>`}</b>`
+    + ` — ${pass} pass / ${fail} fail<br><br>` + log.join('<br>');
+};
+window.addEventListener('error', e => { log.push(`<span class="bad">모듈 예외</span> ${e.message} @${e.filename}:${e.lineno}`); paint(); });
+window.addEventListener('unhandledrejection', e => { log.push(`<span class="bad">미처리 거부</span> ${e.reason}`); paint(); });
+
+// 21개 랜드마크짜리 가짜 손. 손바닥(9)을 (x,y)에 두고 손끝은 그 위로 편다.
+const mkHand = (x, y, jitter = 0) => {
+  const j = () => (Math.random() - 0.5) * 2 * jitter;
+  const lm = [];
+  for (let i = 0; i < 21; i++) lm.push({ x: x + j(), y: y + j() });
+  lm[9] = { x: x + j(), y: y + j() };
+  [4, 8, 12, 16, 20].forEach((t, k) => { lm[t] = { x: x + (k - 2) * 0.03 + j(), y: y - 0.07 + j() }; });
+  return lm;
+};
+
+// 활성영역 크롭을 상쇄해서 "정규화 화면 = 입력" 이 되게 만든다 (기대값 계산을 단순화)
+TUNE.ax0 = 0; TUNE.ax1 = 1; TUNE.ay0 = 0; TUNE.ay1 = 1; TUNE.mirror = false;
+
+const src = new HandSource();
+const feed = (hands, tMedia, tPerf) => src._push(hands, hands.map(() => 'Left'), tMedia, tPerf);
+
+// ── 1. 1€ 필터: 정지 신호의 떨림을 실제로 줄이는가 ────────────────────────────
+h2('1€ 필터');
+{
+  const f = new OneEuro({ minCutoff: 1.0, beta: 0.007 });
+  let rawVar = 0, outVar = 0, n = 0;
+  let t = 0;
+  const TRUE = 0.5;
+  for (let i = 0; i < 200; i++) {
+    t += 16.7;
+    const raw = TRUE + (Math.random() - 0.5) * 0.008;   // 실측된 떨림 폭(±0.004)과 같은 수준
+    const out = f.filter(raw, t);
+    if (i > 50) { rawVar += (raw - TRUE) ** 2; outVar += (out - TRUE) ** 2; n++; }
+  }
+  const rms = (v) => Math.sqrt(v / n);
+  ok('정지 신호 떨림 감소', rms(outVar) < rms(rawVar) * 0.5,
+     `raw RMS ${rms(rawVar).toExponential(2)} → 필터 ${rms(outVar).toExponential(2)}`);
+}
+{
+  // ★ 기본 beta 가 실제로 쓸 만한 값인지 못박는다.
+  //   beta 는 신호 단위에 종속인데, 논문 예제값(0.007)을 그대로 쓰면 정규화 화면좌표에선
+  //   컷오프가 1.0+0.007×2=1.014Hz → 속도 적응이 사실상 0 = 그냥 1Hz 고정 저역통과.
+  //   그 상태로 실측하면 빠른 휘두름에서 540px(화면 1/3) 뒤처졌다. 다시 그렇게 되면 여기서 잡힌다.
+  const lagOf = (beta) => {
+    const f = new OneEuro({ minCutoff: 1.0, beta, dCutoff: 1.0 });
+    let t = 0, peak = 0;
+    for (let i = 0; i < 30; i++) { t += 1000/30; f.filter(0.2 + (Math.random()-0.5)*0.008, t); }
+    for (let i = 0; i < 10; i++) {                       // 초당 2.0 = 빠른 휘두름
+      t += 1000/30;
+      const truth = 0.2 + 2.0 * (i * (1000/30)) / 1000;
+      peak = Math.max(peak, Math.abs(truth - f.filter(truth + (Math.random()-0.5)*0.008, t)));
+    }
+    return peak * 1440;                                  // 1440px 화면 기준 px
+  };
+  const lagDefault = lagOf(TUNE.beta);
+  ok('★ 기본 beta가 빠른 휘두름에서 100px 이내로 따라옴 (단위 오해로 0.007 쓰면 356px)',
+     lagDefault < 100, `beta=${TUNE.beta} → 뒤처짐 ${lagDefault.toFixed(0)}px (beta=0.007이면 ${lagOf(0.007).toFixed(0)}px)`);
+
+  // 빠른 신호는 통과시켜야 한다 (beta의 존재 이유). 지연을 재본다.
+  const slow = new OneEuro({ minCutoff: 1.0, beta: 0 });      // beta=0 = 고정 저역통과
+  const fast = new OneEuro({ minCutoff: 1.0, beta: 0.7 });
+  let t = 0, lagSlow = 0, lagFast = 0;
+  for (let i = 0; i < 60; i++) {
+    t += 16.7;
+    const x = i * 0.02;                                        // 빠른 등속 이동
+    lagSlow = x - slow.filter(x, t);
+    lagFast = x - fast.filter(x, t);
+  }
+  ok('빠른 움직임에서 beta가 지연을 줄임', Math.abs(lagFast) < Math.abs(lagSlow),
+     `beta=0 지연 ${lagSlow.toFixed(4)} vs beta=0.7 지연 ${lagFast.toFixed(4)}`);
+}
+
+// ── 2. 히스테리시스: 진입 ────────────────────────────────────────────────────
+h2('존재 히스테리시스');
+{
+  let t = 1000;
+  feed([mkHand(0.5, 0.5)], t, t);
+  let a = src.sample(t);
+  ok('1프레임만으론 영향 없음 (enterFrames=3)', a.length === 0, `어트랙터 ${a.length}개`);
+
+  for (let i = 0; i < 3; i++) { t += 16.7; feed([mkHand(0.5, 0.5)], t, t); src.sample(t); }
+  t += 130;                                    // 진입 램프(120ms) 통과
+  a = src.sample(t);
+  ok('연속 검출 후 어트랙터 12개 생성 (손바닥1+손끝5)', a.length === 6, `${a.length}개`);
+  ok('손바닥 1개 + 손끝 5개', a.filter(x=>x.kind==='palm').length === 1 && a.filter(x=>x.kind==='tip').length === 5);
+  ok('영향력이 1까지 램프업', Math.abs(a[0].w - TUNE.palmW) < 0.01, `w=${a[0].w.toFixed(3)}`);
+  ok('손끝 가중치가 손바닥보다 작음', a[1].w < a[0].w, `tip ${a[1].w.toFixed(2)} < palm ${a[0].w.toFixed(2)}`);
+}
+
+// ── 3. 히스테리시스: 손을 놓쳤을 때 ──────────────────────────────────────────
+// ★ 프로덕션과 같은 조건으로 돌린다: sample()은 렌더 루프가 매 프레임(60fps) 부른다.
+//   램프는 프레임마다 누적되므로 띄엄띄엄 부르면 실제와 다른 값이 나온다.
+{
+  const s = new HandSource();
+  let t = 2000, lostAt = 0;
+  const F = 16.7;
+  const trace = [];   // [놓친 뒤 경과ms, w]
+
+  for (let i = 0; i < 20; i++) { s._push([mkHand(0.5,0.5)], ['Left'], t, t); s.sample(t); t += F; }
+  lostAt = t - F;                                   // 마지막 검출 시각
+  for (let i = 0; i < 90; i++) {                    // 이후 1.5초간 검출 없음 (손이 프레임을 벗어남)
+    const a = s.sample(t);
+    trace.push([+(t - lostAt).toFixed(0), a.length ? a[0].w : 0]);
+    t += F;
+  }
+  const wAt = (ms) => { const e = trace.find(([d]) => d >= ms); return e ? e[1] : 0; };
+
+  ok('놓쳐도 hold(250ms) 동안은 영향 유지 — 실이 얼어붙지 않게', wAt(200) > 0.95, `+200ms에서 w=${wAt(200).toFixed(3)}`);
+  ok('hold 후 서서히 감소 (스냅 아님)', wAt(450) > 0.05 && wAt(450) < 0.95, `+450ms에서 w=${wAt(450).toFixed(3)}`);
+  ok('release(400ms) 지나면 0으로 완전 해제', wAt(700) === 0, `+700ms에서 w=${wAt(700).toFixed(3)}`);
+  ok('감소가 단조롭다 (튀지 않음)', (() => {
+    const post = trace.filter(([d]) => d >= 250).map(([, w]) => w);
+    return post.every((w, i) => i === 0 || w <= post[i-1] + 1e-6);
+  })(), '');
+}
+
+// ── 4. 속도 & 외삽 ──────────────────────────────────────────────────────────
+h2('속도 · 외삽');
+{
+  const s = new HandSource();
+  let t = 3000;
+  const V = 0.5;                                  // 정규화화면 0.5/초로 등속 우이동
+  for (let i = 0; i < 25; i++) {
+    const x = 0.2 + V * (i * 16.7) / 1000;
+    s._push([mkHand(x, 0.5)], ['Left'], t, t);
+    s.sample(t);
+    t += 16.7;
+  }
+  const a = s.sample(t);
+  const palm = a.find(p => p.kind === 'palm');
+  ok('속도 부호/크기가 맞음', palm && palm.nvx > V * 0.6 && palm.nvx < V * 1.4,
+     `측정 ${palm ? palm.nvx.toFixed(3) : '-'} vs 실제 ${V}`);
+  ok('손끝이 손바닥 속도를 물려받음 (독립 미분 금지)',
+     a.filter(p=>p.kind==='tip').every(p => p.nvx === palm.nvx), '');
+
+  // 외삽: 검출이 멈춘 뒤에도 위치가 진행 방향으로 나아가야 한다
+  const x0 = s.sample(t).find(p=>p.kind==='palm').nx;
+  const x1 = s.sample(t + 30).find(p=>p.kind==='palm').nx;
+  ok('검출 공백에도 위치가 외삽됨 (30fps→60fps 이음새)', x1 > x0, `${x0.toFixed(4)} → ${x1.toFixed(4)}`);
+
+  // 외삽 상한: 무한정 날아가면 안 된다
+  const xFar = s.sample(t + 2000);
+  const xCap = s.sample(t + TUNE.maxExtrapMs).find(p=>p.kind==='palm');
+  ok('외삽 상한이 걸림 (손 놓쳐도 실이 무한히 안 날아감)',
+     xFar.length === 0 || xFar.every(p => p.nx <= 1), '');
+}
+
+// ── 5. 손 정체성: 두 손이 모두 "Left"로 와도 안 섞이는가 ─────────────────────
+h2('손 정체성 (실제 MediaPipe가 두 손 다 Left로 주는 경우)');
+{
+  const s = new HandSource();
+  let t = 4000;
+  // 왼쪽 손은 왼쪽에, 오른쪽 손은 오른쪽에. 라벨은 둘 다 'Left'.
+  for (let i = 0; i < 6; i++) {
+    s._push([mkHand(0.25, 0.5), mkHand(0.75, 0.5)], ['Left', 'Left'], t, t);
+    s.sample(t); t += 16.7;
+  }
+  t += 130;
+  let a = s.sample(t);
+  ok('두 손이 각각 트랙을 가짐', s.tracks.size === 2, `트랙 ${s.tracks.size}개`);
+  ok('어트랙터 12개 (손 2개 × 6)', a.length === 12, `${a.length}개`);
+
+  // ★ 순서를 뒤집어서 준다 — MediaPipe는 순서를 보장하지 않는다
+  for (let i = 0; i < 4; i++) {
+    s._push([mkHand(0.75, 0.5), mkHand(0.25, 0.5)], ['Left', 'Left'], t, t);
+    s.sample(t); t += 16.7;
+  }
+  a = s.sample(t);
+  const palms = a.filter(p => p.kind === 'palm').map(p => p.nx).sort((x, y) => x - y);
+  ok('검출 순서가 뒤바뀌어도 트랙이 안 늘어남', s.tracks.size === 2, `트랙 ${s.tracks.size}개`);
+  ok('순서 뒤바뀜에도 두 손 위치 유지 (필터 상태가 안 섞임)',
+     palms.length === 2 && Math.abs(palms[0] - 0.25) < 0.05 && Math.abs(palms[1] - 0.75) < 0.05,
+     `손바닥 x = ${palms.map(v=>v.toFixed(3)).join(', ')}`);
+  // 속도 폭발 = 두 트랙이 서로 뒤바뀌었다는 신호 (0.25↔0.75 점프 = 초당 30 수준)
+  const maxV = Math.max(...a.map(p => Math.abs(p.nvx)));
+  ok('속도가 폭발하지 않음 (트랙 뒤바뀜의 징후)', maxV < 2, `max |vx| = ${maxV.toFixed(3)}`);
+}
+
+// ── 4b. 톱니 — 검출 30fps를 렌더 60Hz로 펼 때 프레임당 이동이 균일한가 ──────────
+// 증상: "마우스로 끌면 자연스러운데 주먹으로 끌면 분사가 끊긴다".
+// 마우스는 매 프레임 진짜 위치지만 손은 초당 30번만 진짜고 나머지는 예측이다.
+// 검출이 올 때마다 위치를 필터값으로 리셋하면 앞서감/당겨짐이 반복 = 톱니.
+// 경로 분사가 입자를 "그 프레임의 이동거리"에 뿌리므로, 이동거리가 출렁이면 밀도가 출렁여 띠가 생긴다.
+h2('톱니 (30fps 검출 → 60Hz 렌더)');
+{
+  const mk = (x) => { const lm = []; for (let i = 0; i < 21; i++) lm.push({ x, y: 0.5 });
+    lm[0] = {x, y:0.5}; lm[9] = {x, y:0.5-0.18}; return lm; };
+  const W6 = [{x:0,y:0,z:0},{x:0,y:-0.09,z:0}]; for (let i=0;i<4;i++) W6.push({x:0,y:-1.75*0.09,z:0});
+  // ★ 손이 화면 안에 머물러야 한다 — 벗어나면 clamp01 에 걸려 delta가 0이 되고 측정이 통째로 거짓이 된다.
+  //   (실제로 이 함정에 빠져서 "뒤로 5.9px 간다"는 엉터리 수치를 냈었다)
+  // ★ 랜드마크 떨림(±0.004, 정지 이미지에서 실측한 값)이 **반드시 있어야** 한다.
+  //   떨림 없는 입력은 톱니가 아예 안 생겨서(sd 0.05px) 아무것도 검증하지 못한다.
+  //   톱니는 "떨리는 위치를 필터링한 값 + 검출마다 리셋"에서 나온다.
+  const V = 0.5, X0 = 0.15, DET = 1000/30, R = 1000/60, JIT = 0.004;
+  const measure = (tau) => {
+    const save = TUNE.trackTau; TUNE.trackTau = tau;
+    const s = new HandSource();
+    let t = 8e5, nextDet = 0, prev = null, clamped = false;
+    const d = [];
+    for (let ms = 0; ms < 1200; ms += R) {
+      const truth = X0 + V*ms/1000;
+      if (ms >= nextDet) {
+        s._push([mk(truth + (Math.random()-0.5)*2*JIT)], ['Left'], t+ms, t+ms, [W6], 1);
+        nextDet += DET;
+      }
+      const h = s.sample(t+ms).find(a => a.kind === 'palm');
+      if (!h) continue;
+      if (h.nx <= 0 || h.nx >= 1) clamped = true;
+      if (prev !== null && ms > 500) d.push((h.nx - prev) * 1440);
+      prev = h.nx;
+    }
+    TUNE.trackTau = save;
+    const m = a => a.reduce((x,y)=>x+y,0)/a.length;
+    const avg = m(d);
+    return { clamped, avg, sd: Math.sqrt(m(d.map(x => (x-avg)**2))), d: d.sort((a,b)=>a-b) };
+  };
+  // 난수 떨림이라 5회 평균
+  const avgOf = (tau) => {
+    const rs = Array.from({ length: 5 }, () => measure(tau));
+    return { clamped: rs.some(r => r.clamped),
+             avg: rs.reduce((a,r)=>a+r.avg,0)/5,
+             sd:  rs.reduce((a,r)=>a+r.sd,0)/5,
+             lo:  rs.reduce((a,r)=>a+r.d[0],0)/5,
+             hi:  rs.reduce((a,r)=>a+r.d[r.d.length-1],0)/5 };
+  };
+  const raw = avgOf(0.001);          // trackTau≈0 = 톱니 제거 전과 동일한 동작
+  const fixed = avgOf(TUNE.trackTau);
+  ok('손이 화면 안에 있다 (검사 자체의 검사 — 벗어나면 clamp에 걸려 측정이 거짓이 된다)',
+     !raw.clamped && !fixed.clamped);
+  ok('떨림이 실제로 톱니를 만든다 (검사 자체의 검사)', raw.sd > 1,
+     `떨림 있는 입력에서 들쭉날쭉 ${raw.sd.toFixed(2)}px — 떨림 0이면 0.05로 아무것도 검증 못 한다`);
+  ok('등속 손은 프레임당 12px 이동이 정답', Math.abs(fixed.avg - 12) < 1.5, `${fixed.avg.toFixed(1)}px`);
+  ok('★ 톱니 제거가 균일도를 개선', fixed.sd < raw.sd * 0.6,
+     `들쭉날쭉 ${raw.sd.toFixed(2)} → ${fixed.sd.toFixed(2)}px`);
+  ok('★ 프레임당 이동이 고르다 (경로 분사 밀도가 이걸 그대로 반영한다)',
+     fixed.sd / Math.abs(fixed.avg) < 0.12,
+     `${fixed.lo.toFixed(1)} ~ ${fixed.hi.toFixed(1)}px (전: ${raw.lo.toFixed(1)} ~ ${raw.hi.toFixed(1)})`);
+}
+
+// ── 5b. 유령 손 — 세게 휘두를 때 한 손이 둘로 갈라지는가 ──────────────────────
+// 실제 증상: "가끔 개빨리 움직이면 주먹을 2개로 인식하고 하나는 안 움직인다".
+// 원인은 오검출이 아니라 매칭 규칙이었다 — 카메라 30fps라 검출 간격이 33ms인데 세게 휘두르면
+// 그 사이 손이 화면의 20% 넘게 건너뛴다. "마지막 자리" 기준으로 재면 다른 손으로 보고 새 트랙을
+// 만들고, 옛 트랙은 hold 250 + release 400ms 동안 **옛 자리에 얼어붙은 유령**으로 남는다.
+{
+  const s = new HandSource();
+  const mk = (x) => { const lm = []; for (let i = 0; i < 21; i++) lm.push({ x, y: 0.5 }); return lm; };
+  const DET = 1000 / 30;                       // 카메라 30fps = 검출 간격 33ms
+  let t = 6e4, x = 0.05;
+  // ★ 옛 규칙(마지막 위치 기준, 허용 0.25)이 **반드시 깨지는** 속도여야 검사에 의미가 있다.
+  //   초당 9 → 33ms에 0.30 이동 > 0.25 → 옛 코드는 여기서 트랙을 쪼갰다.
+  const V = 9.0;
+  ok('이 속도면 옛 규칙(0.25)이 실제로 깨진다 (검사 자체의 검사)',
+     V * DET / 1000 > 0.25, `33ms에 ${(V*DET/1000).toFixed(2)} 이동 > 0.25`);
+
+  for (let i = 0; i < 6; i++) { s._push([mk(x)], ['Left'], t, t, null, 1); s.sample(t); t += DET; }
+  t += 130; s.sample(t);
+  const before = s.tracks.size;
+
+  // 손이 화면을 가로질러 쭉 날아간다
+  let maxTracks = before;
+  for (let i = 0; i < 10; i++) {
+    x = Math.min(0.95, x + V * DET / 1000);
+    s._push([mk(x)], ['Left'], t, t, null, 1);
+    s.sample(t);
+    maxTracks = Math.max(maxTracks, s.tracks.size);
+    t += DET;
+  }
+  const hands = s.sampleHands(t);
+
+  ok('★ 세게 휘둘러도 손이 하나로 유지됨 (예측 매칭)', maxTracks === 1,
+     `휘두르는 동안 최대 트랙 ${maxTracks}개 · 33ms마다 ${(V*DET/1000).toFixed(2)} 이동`);
+  ok('★ 얼어붙은 유령이 안 남음', hands.length === 1, `보이는 손 ${hands.length}개`);
+  ok('손이 실제 위치를 따라옴', hands.length === 1 && Math.abs(hands[0].nx - x) < 0.15,
+     `추적 ${hands[0]?.nx.toFixed(2)} vs 실제 ${x.toFixed(2)}`);
+
+  // 그래도 놓쳤다 멀리서 다시 찾은 경우 — 유령 청소 그물이 받아야 한다
+  const s2 = new HandSource();
+  let t2 = 7e4;
+  for (let i = 0; i < 6; i++) { s2._push([mk(0.2)], ['Left'], t2, t2, null, 1); s2.sample(t2); t2 += DET; }
+  t2 += 100;                                   // 손을 완전히 놓침 (검출 없음)
+  for (let i = 0; i < 6; i++) { s2.sample(t2); t2 += DET; }
+  for (let i = 0; i < 6; i++) { s2._push([mk(0.85)], ['Left'], t2, t2, null, 1); s2.sample(t2); t2 += DET; }
+  ok('★ 놓쳤다 반대편에서 다시 찾아도 트랙이 안 늘어남 (유령 청소)', s2.tracks.size === 1,
+     `트랙 ${s2.tracks.size}개`);
+}
+
+// ── 6. 워커↔메인 메시지 계약 (실제 워커를 띄워 진짜 메시지로 검증) ────────────
+// 이 구간은 _push()를 직접 부르는 위 테스트들이 전부 건너뛰는 곳이다.
+// 실제로 여기서 tMedia/tPerf 누락 버그가 났었다 — 예외 없이 조용히 죽는 종류라 반드시 실물로 확인한다.
+h2('워커 ↔ 메인 메시지 계약 (실물 MediaPipe)');
+await (async () => {
+  const w = new Worker('/hand/hand-worker.js', { type: 'module' });
+  const wait = (pred) => new Promise((res, rej) => {
+    const to = setTimeout(() => rej(new Error('timeout')), 20000);
+    w.addEventListener('message', function h(e) {
+      if (pred(e.data)) { clearTimeout(to); w.removeEventListener('message', h); res(e.data); }
+    });
+  });
+  try {
+    w.postMessage({ type: 'init' });
+    const ready = await wait(m => m.type === 'ready' || m.type === 'error');
+    ok('워커에서 MediaPipe 초기화 성공', ready.type === 'ready', ready.message || '');
+    if (ready.type !== 'ready') return;
+
+    // ImageBitmap은 fetch→blob 경로로 만든다. new Image()+decode()는 렌더링에 의존해서
+    // 보이지 않는 탭/창에서는 영영 resolve되지 않을 수 있다 (실제로 여기서 멈췄었다).
+    const blob = await (await fetch('/test/hands.jpg')).blob();
+    const bmp = await createImageBitmap(blob);
+    const tMedia = 1234.5, tPerf = performance.now();
+    w.postMessage({ type: 'frame', bitmap: bmp, t: tMedia, tMedia, tPerf }, [bmp]);
+    const r = await wait(m => m.type === 'hands');
+
+    ok('MediaPipe 공식 테스트 이미지에서 손 2개 검출', r.hands.length === 2, `${r.hands.length}개`);
+    ok('손마다 랜드마크 21개', r.hands.every(h => h.length === 21));
+    ok('★ tMedia 를 돌려줌 (없으면 속도 dt=NaN → brush 영구 0)',
+       Number.isFinite(r.tMedia) && r.tMedia === tMedia, `tMedia=${r.tMedia}`);
+    ok('★ tPerf 를 돌려줌 (없으면 age=NaN → 어트랙터 영구 0개)',
+       Number.isFinite(r.tPerf) && r.tPerf === tPerf, `tPerf=${r.tPerf}`);
+
+    // 그리고 그 메시지가 HandSource에서 실제로 어트랙터가 되는지 (전 구간 통합)
+    // ★ 프로덕션과 동일하게 매 프레임 sample()을 부른다 (램프는 프레임마다 누적된다)
+    const s2 = new HandSource();
+    for (let i = 0; i < 16; i++) {
+      s2._push(r.hands, r.handedness, tMedia + i * 16.7, tPerf + i * 16.7);
+      s2.sample(tPerf + i * 16.7);
+    }
+    const a = s2.sample(tPerf + 16 * 16.7);
+    ok('워커가 준 진짜 랜드마크 → 어트랙터 12개 (손 2개 × 6)', a.length === 12, `${a.length}개`);
+    ok('진짜 랜드마크에서 손끝이 손바닥과 분리됨 (뭉개지지 않음)', (() => {
+      const palms = a.filter(p => p.kind === 'palm');
+      const tips = a.filter(p => p.kind === 'tip');
+      if (palms.length !== 2 || tips.length !== 10) return false;
+      // 손끝이 최소한 손바닥과 다른 좌표에 있어야 갈라짐이 생긴다
+      return tips.some(t => palms.every(p => Math.hypot(t.nx - p.nx, t.ny - p.ny) > 0.01));
+    })(), '');
+    ok('HandSource가 오류 상태가 아님', s2.state !== 'error', s2.error);
+  } catch (e) {
+    ok('워커 계약 검사', false, String(e.message || e));
+  } finally { w.terminate(); }
+})();
+
+// ── 7. openness 실측 — MediaPipe 공식 제스처 사진 ─────────────────────────────
+// ★ 사진마다 워커를 새로 띄운다. runningMode:'VIDEO'는 직전 프레임 결과로 다음 프레임을
+//   추적하므로, 서로 무관한 사진을 한 워커에 연달아 넣으면 앞 사진이 뒤 사진을 오염시킨다.
+//   (실제로 그래서 pointing이 1.024 대신 1.170으로 나왔었다. 프로덕션에선 연속 프레임이라
+//    문제가 없지만, 사진 한 장을 재는 이 검사에선 반드시 격리해야 한다.)
+h2('openness 실측 — 공식 제스처 사진 (사진마다 워커 격리)');
+const GEST = {};
+for (const name of ['fist', 'hands', 'victory', 'pointing_up']) {
+  const w = new Worker('/hand/hand-worker.js', { type: 'module' });
+  const wait = (pred) => new Promise((res, rej) => {
+    const to = setTimeout(() => rej(new Error('timeout')), 20000);
+    w.addEventListener('message', function h(e) {
+      if (pred(e.data)) { clearTimeout(to); w.removeEventListener('message', h); res(e.data); } });
+  });
+  try {
+    w.postMessage({ type: 'init' });
+    if ((await wait(m => m.type === 'ready' || m.type === 'error')).type !== 'ready') {
+      ok(`${name} 워커`, false); continue;
+    }
+    const bmp = await createImageBitmap(await (await fetch(`/test/${name}.jpg`)).blob());
+    w.postMessage({ type: 'frame', bitmap: bmp, t: 1000, tMedia: 1000, tPerf: performance.now() }, [bmp]);
+    const r = await wait(m => m.type === 'hands');
+    GEST[name] = { r, open: r.world.length ? opennessOf(r.world[0]) : null };
+  } catch (e) { ok(`${name} 측정`, false, String(e.message || e)); }
+  finally { w.terminate(); }
+}
+
+ok('worker가 world 랜드마크 6점을 보냄 (없으면 주먹 판정 자체가 불가)',
+   GEST.fist && Array.isArray(GEST.fist.r.world) && GEST.fist.r.world[0]?.length === 6);
+ok('주먹 < grabOn', GEST.fist?.open < TUNE.grabOn, `fist=${GEST.fist?.open.toFixed(3)} < ${TUNE.grabOn}`);
+ok('편 손 > grabOff', GEST.hands?.open > TUNE.grabOff, `open=${GEST.hands?.open.toFixed(3)} > ${TUNE.grabOff}`);
+ok('주먹 대비 편 손이 2배 넘게 벌어짐 (판정 여유)', GEST.hands?.open / GEST.fist?.open > 2,
+   `${(GEST.hands?.open / GEST.fist?.open).toFixed(2)}배`);
+ok('✌️는 편 손 쪽 — 분사 안 됨', GEST.victory?.open > TUNE.grabOn, `victory=${GEST.victory?.open.toFixed(3)}`);
+ok('☝️는 움켜쥔 쪽 — 의도된 동작(검지만 폈어도 나머지 셋은 접힘)',
+   GEST.pointing_up?.open < TUNE.grabOn, `pointing=${GEST.pointing_up?.open.toFixed(3)}`);
+ok('임계값이 주먹·편 손 사이에 있고 히스테리시스 구간 존재',
+   GEST.fist?.open < TUNE.grabOn && TUNE.grabOn < TUNE.grabOff && TUNE.grabOff < GEST.hands?.open,
+   `${GEST.fist?.open.toFixed(2)} < ${TUNE.grabOn} < ${TUNE.grabOff} < ${GEST.hands?.open.toFixed(2)}`);
+
+// ── 8. 움켜쥐기 상태 전이 (합성 입력 — 손 위치는 고정, openness만 변화) ──────────
+// 실사진을 연달아 먹이면 손 위치가 달라 트랙이 새로 생겨버린다(그래서 값이 초기값에 머문다).
+// 여기서 검증할 건 "openness가 오르내릴 때 grab이 어떻게 켜지고 꺼지는가" 뿐이므로 합성이 옳다.
+h2('움켜쥐기 상태 전이 (슈미트 트리거)');
+{
+  const lm = []; for (let i = 0; i < 21; i++) lm.push({ x: 0.5, y: 0.5 });
+  // world 6점 [손목, 중지MCP, 손끝×4] 을 만들어 원하는 openness 를 정확히 재현
+  const mkWorld = (openness) => {
+    const palm = 0.09;
+    const W = [{x:0,y:0,z:0}, {x:0,y:-palm,z:0}];
+    for (let i = 0; i < 4; i++) W.push({ x: 0, y: -openness * palm, z: 0 });
+    return [W];
+  };
+  const s = new HandSource();
+  const feed = (openness, n, t0) => { let t = t0;
+    for (let i = 0; i < n; i++) { s._push([lm], ['Left'], t, t, mkWorld(openness)); s.sample(t); t += 16.7; }
+    return t; };
+
+  ok('mkWorld가 의도한 openness를 만든다 (검사 자체의 검사)',
+     Math.abs(opennessOf(mkWorld(1.75)[0]) - 1.75) < 1e-6, `${opennessOf(mkWorld(1.75)[0]).toFixed(4)}`);
+
+  let t = 5e4;
+  t = feed(1.75, 25, t);                                    // 편 손
+  ok('편 손 → grab=false', s.sampleHands(t)[0]?.grab === false, `openness=${s.sampleHands(t)[0]?.openness.toFixed(2)}`);
+  ok('트랙 1개 (같은 손이 유지됨)', s.tracks.size === 1, `${s.tracks.size}개`);
+
+  t = feed(1.30, 25, t);                                    // 히스테리시스 구간(1.15~1.40) — 아직 아님
+  ok('임계 사이(1.30)에선 안 켜짐 — 손을 살짝 오므린 정도로 분사되면 안 된다',
+     s.sampleHands(t)[0]?.grab === false, `openness=${s.sampleHands(t)[0]?.openness.toFixed(2)}`);
+
+  t = feed(0.81, 25, t);                                    // 주먹 (실측값)
+  ok('★ 주먹 → grab=true', s.sampleHands(t)[0]?.grab === true, `openness=${s.sampleHands(t)[0]?.openness.toFixed(2)}`);
+
+  ok('★ 검출이 끊겨도 hold 동안 grab 유지 — 한 프레임 깜빡임에 분사가 끊기면 안 된다',
+     s.sampleHands(t + 150)[0]?.grab === true, '+150ms');
+
+  t = feed(1.30, 25, t);                                    // 다시 히스테리시스 구간 — 유지돼야
+  ok('★ 임계 사이(1.30)로 돌아와도 grab 유지 — 슈미트 트리거의 핵심',
+     s.sampleHands(t)[0]?.grab === true, `openness=${s.sampleHands(t)[0]?.openness.toFixed(2)}`);
+
+  t = feed(1.75, 25, t);                                    // 완전히 폄
+  ok('★ 펴면 grab=false', s.sampleHands(t)[0]?.grab === false, `openness=${s.sampleHands(t)[0]?.openness.toFixed(2)}`);
+
+  // 경계에서 떨리는 입력 → 출력이 점멸하면 안 된다 (입자가 깜빡인다는 뜻)
+  let flips = 0, prev = null;
+  for (let i = 0; i < 120; i++) {
+    const noisy = TUNE.grabOn + (Math.random() - 0.5) * 0.16;   // 임계값 위아래로 떨리는 손
+    s._push([lm], ['Left'], t, t, mkWorld(noisy)); s.sample(t);
+    const g = s.sampleHands(t)[0]?.grab;
+    if (prev !== null && g !== prev) flips++;
+    prev = g; t += 16.7;
+  }
+  ok('★ 임계값에서 떨리는 손에도 점멸하지 않음', flips <= 1, `2초간 전환 ${flips}회`);
+}
+
+// ── 9. 거리 → 배율 ──────────────────────────────────────────────────────────
+// 손이 멀면 작게 찍힌다. 그 "찍힌 크기"가 곧 거리다.
+// 검증 방법: 같은 사진을 축소해서 넣는다 = 손이 그만큼 멀어진 것과 같다.
+//   → 잰 크기가 축소 배율에 **비례**해야 한다. 비례하지 않으면 "멀어지는 느낌"이 안 난다.
+h2('거리 → 배율 (사진을 축소해 거리를 흉내)');
+await (async () => {
+  const blob = await (await fetch('/test/hands.jpg')).blob();
+  const base = await createImageBitmap(blob);
+
+  // 원본 캔버스 크기는 유지하고 내용만 k배로 축소 = 손이 1/k 배 멀어진 것
+  const atDistance = (k) => {
+    const c = new OffscreenCanvas(base.width, base.height);
+    const g = c.getContext('2d');
+    g.fillStyle = '#202020'; g.fillRect(0, 0, c.width, c.height);
+    const w = base.width * k, h = base.height * k;
+    g.drawImage(base, (c.width - w) / 2, (c.height - h) / 2, w, h);
+    return c;
+  };
+
+  const KS = [1.0, 0.8, 0.6, 0.45];
+  const got = [];
+  for (const k of KS) {
+    // 거리마다 워커 격리 — VIDEO 모드 추적이 이전 거리의 결과를 끌고 오면 측정이 오염된다
+    const w = new Worker('/hand/hand-worker.js', { type: 'module' });
+    const wait = (p) => new Promise((res, rej) => {
+      const to = setTimeout(() => rej(new Error('timeout')), 20000);
+      w.addEventListener('message', function h(e) {
+        if (p(e.data)) { clearTimeout(to); w.removeEventListener('message', h); res(e.data); } });
+    });
+    try {
+      w.postMessage({ type: 'init' });
+      if ((await wait(m => m.type === 'ready' || m.type === 'error')).type !== 'ready') { got.push(null); continue; }
+      const bmp = await createImageBitmap(atDistance(k));
+      w.postMessage({ type: 'frame', bitmap: bmp, t: 1000, tMedia: 1000, tPerf: performance.now() }, [bmp]);
+      const r = await wait(m => m.type === 'hands');
+      got.push(r.hands.length ? { size: apparentSizeOf(r.hands[0], r.aspect), aspect: r.aspect } : null);
+    } catch (e) { got.push(null); }
+    finally { w.terminate(); }
+  }
+
+  ok('worker가 aspect(화면비)를 보냄 — 없으면 손 기울일 때 크기가 요동친다',
+     got[0] && Math.abs(got[0].aspect - base.width / base.height) < 1e-6, `aspect=${got[0]?.aspect.toFixed(3)}`);
+  ok('모든 거리에서 손이 잡힘', got.every(g => g && g.size), got.map((g,i)=>`${KS[i]}×:${g?.size?.toFixed(4) ?? '✗'}`).join(' '));
+
+  if (got.every(g => g && g.size)) {
+    // ★ 핵심: 잰 크기가 축소 배율에 비례하는가
+    const ratios = got.map((g, i) => g.size / KS[i]);       // 비례한다면 전부 같은 값
+    const mean = ratios.reduce((a, b) => a + b, 0) / ratios.length;
+    const dev = Math.max(...ratios.map(r => Math.abs(r - mean) / mean));
+    ok('★ 잰 크기가 거리에 비례 (= 원근 그대로)', dev < 0.12,
+       `배율별 size/k = ${ratios.map(r => r.toFixed(4)).join(', ')} · 최대편차 ${(dev*100).toFixed(1)}%`);
+    ok('가까울수록 크게, 멀수록 작게 (단조)',
+       got.every((g, i) => i === 0 || g.size < got[i-1].size),
+       got.map((g,i) => `${KS[i]}×→${g.size.toFixed(3)}`).join('  '));
+
+    // 배율 파이프라인이 실제로 그 값을 내보내는가
+    const mk = (k) => {
+      const lm = []; for (let i = 0; i < 21; i++) lm.push({ x: 0.5, y: 0.5 });
+      lm[0] = { x: 0.5, y: 0.5 };
+      lm[9] = { x: 0.5, y: 0.5 - TUNE.sizeRef * k };        // aspect=1 이면 순수 y 거리
+      const W = [{x:0,y:0,z:0},{x:0,y:-0.09,z:0}];
+      for (let i = 0; i < 4; i++) W.push({ x: 0, y: -1.75 * 0.09, z: 0 });
+      return { lm, world: [W] };
+    };
+    const s = new HandSource();
+    const feed = (k, n, t0) => { let t = t0; const { lm, world } = mk(k);
+      for (let i = 0; i < n; i++) { s._push([lm], ['Left'], t, t, world, 1); s.sample(t); t += 16.7; } return t; };
+    let t = 9e4;
+    t = feed(1.0, 40, t);
+    const at1 = s.sampleHands(t)[0]?.scale;
+    ok('기준 거리(sizeRef)에서 배율 ≈ 1', Math.abs(at1 - 1) < 0.05, `scale=${at1?.toFixed(3)}`);
+    t = feed(0.5, 40, t);
+    const at05 = s.sampleHands(t)[0]?.scale;
+    ok('★ 손이 2배 멀어지면 배율도 절반', Math.abs(at05 - 0.5) < 0.05, `scale=${at05?.toFixed(3)}`);
+    t = feed(2.0, 40, t);
+    const at2 = s.sampleHands(t)[0]?.scale;
+    ok('손이 2배 가까우면 배율도 2배', Math.abs(at2 - 2) < 0.05, `scale=${at2?.toFixed(3)}`);
+    t = feed(9.0, 60, t);
+    ok('너무 가까워도 상한에서 멈춤', Math.abs(s.sampleHands(t)[0]?.scale - TUNE.sizeMax) < 1e-6,
+       `scale=${s.sampleHands(t)[0]?.scale.toFixed(2)} = sizeMax`);
+    t = feed(0.02, 60, t);
+    ok('너무 멀어도 하한에서 멈춤 (0으로 사라지지 않음)',
+       Math.abs(s.sampleHands(t)[0]?.scale - TUNE.sizeMin) < 1e-6,
+       `scale=${s.sampleHands(t)[0]?.scale.toFixed(2)} = sizeMin`);
+
+    // ★ 움켜쥐어도 배율이 변하면 안 된다 — 움켜쥠이 곧 분사 트리거라 즉시 티가 난다
+    const s2 = new HandSource();
+    const mkPose = (openness) => {
+      const lm = []; for (let i = 0; i < 21; i++) lm.push({ x: 0.5, y: 0.5 });
+      lm[0] = { x: 0.5, y: 0.5 };
+      lm[9] = { x: 0.5, y: 0.5 - TUNE.sizeRef };            // 손바닥은 그대로
+      const W = [{x:0,y:0,z:0},{x:0,y:-0.09,z:0}];
+      for (let i = 0; i < 4; i++) W.push({ x: 0, y: -openness * 0.09, z: 0 });
+      return { lm, world: [W] };
+    };
+    let t2 = 1e5;
+    const feed2 = (o, n) => { const { lm, world } = mkPose(o);
+      for (let i = 0; i < n; i++) { s2._push([lm], ['Left'], t2, t2, world, 1); s2.sample(t2); t2 += 16.7; } };
+    feed2(1.75, 40);
+    const scaleOpen = s2.sampleHands(t2)[0]?.scale;
+    feed2(0.81, 40);
+    const h2f = s2.sampleHands(t2)[0];
+    ok('★ 주먹을 쥐어도 배율이 안 변함 (손바닥 뼈로 재기 때문)',
+       h2f?.grab === true && Math.abs(h2f.scale - scaleOpen) < 1e-6,
+       `편 손 ${scaleOpen?.toFixed(3)} → 주먹 ${h2f?.scale.toFixed(3)} (grab=${h2f?.grab})`);
+  }
+})();
+
+// ── 10. sampleHands 계약 ────────────────────────────────────────────────────
+// hand/ 는 thread-field 와 void 두 곳에 복사되어 있다. 한쪽만 고치면 다른 쪽이 조용히 썩는다.
+// 실제로 그랬다: void 사본에 scale 이 없어서 RING_RADIUS * undefined = NaN → 입자가 통째로 사라짐.
+// 예외가 안 나므로 눈으로는 "왜 안 나오지?" 밖에 안 보인다. 계약을 못박아 둔다.
+h2('sampleHands 계약 (복제본 표류 방지)');
+{
+  const lm = []; for (let i = 0; i < 21; i++) lm.push({ x: 0.5, y: 0.5 });
+  lm[0] = { x: 0.5, y: 0.5 }; lm[9] = { x: 0.5, y: 0.5 - 0.18 };
+  const W = [{x:0,y:0,z:0},{x:0,y:-0.09,z:0}];
+  for (let i = 0; i < 4; i++) W.push({ x: 0, y: -0.81 * 0.09, z: 0 });
+  const s = new HandSource();
+  let t = 2e5;
+  for (let i = 0; i < 20; i++) { s._push([lm], ['Left'], t, t, [W], 1); s.sample(t); t += 16.7; }
+  const h = s.sampleHands(t)[0];
+  const REQUIRED = ['nx','ny','nvx','nvy','grab','openness','scale','size','influence'];
+  ok('필수 필드가 전부 있음', h && REQUIRED.every(k => h[k] !== undefined),
+     REQUIRED.filter(k => !h || h[k] === undefined).join(',') || '전부 존재');
+  ok('★ scale 이 유한한 수 (undefined 면 void 에서 NaN 입자 = 화면이 빈다)',
+     Number.isFinite(h?.scale) && h.scale > 0, `scale=${h?.scale}`);
+  ok('nx/ny 가 0~1 범위', h && h.nx >= 0 && h.nx <= 1 && h.ny >= 0 && h.ny <= 1, `(${h?.nx.toFixed(2)}, ${h?.ny.toFixed(2)})`);
+  ok('grab 이 boolean', typeof h?.grab === 'boolean', `${h?.grab}`);
+  // void 가 쓰는 그대로 계산해본다
+  const ringOK = Number.isFinite(300 * h.scale) && Number.isFinite(h.nx * 1440);
+  ok('void 의 spawnParticles 인자가 전부 유한한 수', ringOK,
+     `ring=${(300*h.scale).toFixed(0)}px, x=${(h.nx*1440).toFixed(0)}px`);
+}
+
+log.push('<br><b>— 검사 종료 —</b>');
+paint();
+window.__test = { pass, fail };
+</script>
+</body></html>

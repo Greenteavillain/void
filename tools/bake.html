@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>점 굽기</title>
+<style>body{background:#111;color:#ddd;font:13px/1.7 ui-monospace,monospace;padding:20px}
+#svgsrc{position:fixed;left:-99999px;top:0;width:0;height:0;overflow:hidden;opacity:0}
+.ok{color:#6ee7a8}.bad{color:#e74865}</style></head>
+<body>
+<div id="out">굽는 중…</div>
+<div id="svgsrc"></div>
+<script type="module">
+// ─────────────────────────────────────────────────────────────────────────────
+// 점 굽기 — art/thread-field.svg → art/points.bin
+//
+// 왜: 실행할 때마다 getPointAtLength를 40,127번 부르는 데 2.25초가 걸린다(전체 로딩의 98%).
+//     그런데 이 그림은 고정이다. 좌표를 매번 SVG 곡선 수학으로 다시 유도할 이유가 없다.
+//
+// 왜 노드가 아니라 브라우저에서 굽는가: 원본 build()가 쓰는 것과 **같은 브라우저 구현**으로
+//     뽑아야 좌표가 바뀌지 않는다. JS path 라이브러리로 다시 계산하면 미세하게 다른 그림이 된다.
+//
+// 왜 Float32인가: 원본이 어차피 Float32Array에 담는다(`rx[idx] = px[idx] = pt.x`).
+//     즉 Float32로 굽는 건 반올림 손실이 아니라 **비트 단위로 원본과 동일**하다.
+//
+// 그림을 고치면: art/thread-field.svg 교체 → 이 페이지 다시 열기.
+//   bash tools/bake.sh
+// ─────────────────────────────────────────────────────────────────────────────
+
+const log = [];
+const say = (s, cls) => { log.push(cls ? `<span class="${cls}">${s}</span>` : s);
+  document.getElementById('out').innerHTML = log.join('<br>'); };
+
+// ★ index.html 의 P 값과 반드시 일치해야 한다
+const SAMPLE_EVERY = 64, MIN_PTS = 12, MAX_PTS = 58;
+const VB_W = 944.53, VB_H = 925.38;
+const CLASS_IDX = { 'cls-1': 0, 'cls-2': 1, 'cls-3': 2 };   // 흰 / 시안 / 빨강
+
+const svgText = await (await fetch('../art/thread-field.svg')).text();
+document.getElementById('svgsrc').innerHTML = svgText;
+const paths = [...document.querySelectorAll('#svgsrc path')];
+say(`path ${paths.length}개`);
+
+const t0 = performance.now();
+const meta = [];
+let total = 0;
+for (const p of paths) {
+  let len = 0;
+  try { len = p.getTotalLength(); } catch (e) { len = 0; }
+  if (!len || !isFinite(len)) continue;                     // 원본과 동일한 스킵 조건
+  let n = Math.round(len / SAMPLE_EVERY);
+  n = Math.max(MIN_PTS, Math.min(MAX_PTS, n));
+  meta.push({ el: p, len, n, cls: CLASS_IDX[p.getAttribute('class')] ?? 0 });
+  total += n;
+}
+say(`획 ${meta.length}개 · 점 ${total.toLocaleString()}개 — getTotalLength ${(performance.now()-t0).toFixed(0)}ms`);
+
+const t1 = performance.now();
+const xy = new Float32Array(total * 2);
+let i = 0;
+for (const m of meta) {
+  for (let j = 0; j < m.n; j++) {
+    const pt = m.el.getPointAtLength(m.len * j / m.n);      // ★ 원본과 완전히 같은 식
+    xy[i * 2] = pt.x; xy[i * 2 + 1] = pt.y;
+    i++;
+  }
+}
+say(`getPointAtLength ${(performance.now()-t1).toFixed(0)}ms — 이 시간을 없애는 게 목적`);
+
+// ── 바이너리 조립 ──
+// [0] magic 'TFLD' [4] ver [8] N [12] strokeCount [16] vbW [20] vbH [24] sampleEvery
+// [28] strokes: (uint32 count, uint32 colorIdx) × strokeCount
+// [..] points: (float32 x, float32 y) × N        ← 28+8k 는 항상 4바이트 정렬
+const HEAD = 28, SB = meta.length * 8;
+const buf = new ArrayBuffer(HEAD + SB + total * 8);
+const dv = new DataView(buf);
+dv.setUint8(0, 84); dv.setUint8(1, 70); dv.setUint8(2, 76); dv.setUint8(3, 68);  // 'TFLD'
+dv.setUint32(4, 1, true);
+dv.setUint32(8, total, true);
+dv.setUint32(12, meta.length, true);
+dv.setFloat32(16, VB_W, true);
+dv.setFloat32(20, VB_H, true);
+dv.setUint32(24, SAMPLE_EVERY, true);
+meta.forEach((m, k) => { dv.setUint32(HEAD + k*8, m.n, true); dv.setUint32(HEAD + k*8 + 4, m.cls, true); });
+new Float32Array(buf, HEAD + SB).set(xy);
+
+// 되읽어서 자기검증 — 어긋난 채 저장하면 그림이 조용히 망가진다
+{
+  const rN = dv.getUint32(8, true), rS = dv.getUint32(12, true);
+  const pts = new Float32Array(buf, HEAD + SB);
+  let sum = 0; for (const m of meta) sum += m.n;
+  const okAll = rN === total && rS === meta.length && sum === total &&
+                pts.length === total * 2 && pts[0] === xy[0] && pts[total*2-1] === xy[total*2-1];
+  say(`자기검증: ${okAll ? '통과' : '실패'} (N=${rN}, 획=${rS}, 획 합=${sum})`, okAll ? 'ok' : 'bad');
+  if (!okAll) throw new Error('bake self-check failed');
+}
+
+const res = await fetch('/bake', { method: 'POST', headers: { 'X-Filename': 'points.bin' }, body: buf });
+const wrote = await res.text();
+say(`art/points.bin 저장 — ${(+wrote).toLocaleString()} bytes (${(+wrote/1048576).toFixed(2)} MB)`, 'ok');
+window.__bakeDone = { N: total, strokes: meta.length, bytes: +wrote };
+</script>
+</body></html>

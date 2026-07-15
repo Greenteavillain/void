@@ -3,160 +3,300 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Particle Spray Ring</title>
+  <title>홖 — 손으로 만지는 것들</title>
   <style>
     html, body { height: 100%; margin: 0; background:#000; overflow:hidden; }
-    canvas { display:block; width:100%; height:100%; }
+    .stage { position: fixed; inset: 0; display: none; width: 100%; height: 100%; }
+    .stage.on { display: block; }
+
+    /* ── 메뉴 ── 작품을 가리지 않게 최소한으로 */
+    #menu {
+      position: fixed; left: 14px; top: 14px; z-index: 10; display: flex; gap: 6px;
+      font: 12px/1 -apple-system, system-ui, sans-serif; user-select: none;
+    }
+    .menu-item {
+      padding: 6px 11px; border-radius: 7px; cursor: pointer;
+      background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.16);
+      color: rgba(255,255,255,.5); backdrop-filter: blur(8px);
+      transition: background .15s, color .15s, border-color .15s;
+    }
+    .menu-item:hover { background: rgba(255,255,255,.14); color: rgba(255,255,255,.8); }
+    .menu-item.on { border-color: rgba(255,255,255,.5); color: #fff; background: rgba(255,255,255,.14); }
+    .menu-item b { font-weight: 600; opacity: .5; margin-right: 5px; }
+    .menu-item.on b { opacity: .9; }
+
+    /* ── 손 인식 ── */
+    #hand-ui {
+      position: fixed; left: 14px; top: 52px; z-index: 10;
+      font: 12px/1.5 -apple-system, system-ui, sans-serif; color: rgba(255,255,255,.5);
+      user-select: none;
+    }
+    #hand-btn {
+      padding: 5px 11px; border-radius: 7px; font: inherit;
+      background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.2);
+      color: rgba(255,255,255,.75); cursor: pointer; backdrop-filter: blur(8px);
+      transition: background .2s ease;
+    }
+    #hand-btn:hover { background: rgba(255,255,255,.16); }
+    #hand-btn.on { border-color: rgba(232,81,96,.6); color: #E85160; }
+    #hand-stat { margin-top: 6px; font-variant-numeric: tabular-nums; font-size: 11px; white-space: pre-line; }
+    #hand-stat.err { color: #E85160; }
+    /* openness 막대 — 자기 손이 어디쯤인지 보이면 튜닝이 감이 아니라 눈이 된다 */
+    #grab-meter { display:none; margin-top: 7px; width: 150px; }
+    #grab-meter.on { display: block; }
+    #grab-bar { position: relative; height: 5px; border-radius: 3px; background: rgba(255,255,255,.14); }
+    #grab-fill { position:absolute; left:0; top:0; bottom:0; width:0; border-radius:3px; background:#5DC4E6; transition: background .15s; }
+    #grab-fill.grab { background: #E85160; }
+    .grab-mark { position:absolute; top:-3px; bottom:-3px; width:1px; background:rgba(255,255,255,.45); }
+    #grab-legend { display:flex; justify-content:space-between; font-size:10px; margin-top:3px; color:rgba(255,255,255,.35); }
+    #scale-row { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:7px; font-size:11px; }
+    #scale-val { font-variant-numeric: tabular-nums; }
+    #cal-btn {
+      padding:2px 7px; border-radius:5px; font:inherit; font-size:10px;
+      background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.2);
+      color:rgba(255,255,255,.6); cursor:pointer;
+    }
+    #cal-btn:hover { background:rgba(255,255,255,.18); color:#fff; }
+    #beta-row { margin-top:8px; font-size:10px; color:rgba(255,255,255,.45); }
+    #beta-slider {
+      -webkit-appearance:none; appearance:none; width:150px; height:3px; margin-top:4px;
+      background:rgba(255,255,255,.18); border-radius:2px; outline:none; cursor:pointer; display:block;
+    }
+    #beta-slider::-webkit-slider-thumb {
+      -webkit-appearance:none; width:12px; height:12px; border-radius:50%; background:#5DC4E6; cursor:pointer;
+    }
+    #hand-cam { position: fixed; right: 14px; bottom: 14px; z-index: 10; width: 200px;
+      border-radius: 8px; border: 1px solid rgba(255,255,255,.14); display: none; }
+    #hand-cam.on { display: block; }
+
+    #hint {
+      position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 5;
+      color: rgba(255,255,255,.3); font: 12px/1.4 -apple-system, system-ui, sans-serif;
+      letter-spacing: .04em; pointer-events: none; text-align: center;
+      transition: opacity .8s ease;
+    }
   </style>
 </head>
 <body>
-  <canvas id="c"></canvas>
-  <script>
-  (() => {
-    const canvas = document.getElementById('c');
-    const ctx = canvas.getContext('2d');
+  <canvas id="stage-particles" class="stage on"></canvas>
+  <canvas id="stage-threads" class="stage"></canvas>
 
-    const COLORS = [
-      { hex: '#FFFFFF', w: 0.8 },
-      { hex: '#E85160', w: 0.1 },
-      { hex: '#5DC4E6', w: 0.1 },
-    ];
+  <div id="menu">
+    <div class="menu-item on" data-scene="0"><b>1</b>입자 분사</div>
+    <div class="menu-item" data-scene="1"><b>2</b>실뭉치</div>
+  </div>
 
+  <div id="hand-ui">
+    <button id="hand-btn">✋ 손으로 조작</button>
+    <div id="hand-stat"></div>
+    <div id="grab-meter">
+      <div id="grab-bar"><div id="grab-fill"></div></div>
+      <div id="grab-legend"><span>주먹</span><span>편 손</span></div>
+      <div id="scale-row">
+        <span id="scale-val">배율 —</span>
+        <button id="cal-btn" title="지금 손 위치를 기준 거리로 삼습니다">여기가 기준</button>
+      </div>
+      <!-- 빠르게 휘두를 때 손을 얼마나 잘 따라오는가. 올릴수록 덜 뒤처지고,
+           정지 시 떨림에는 영향이 없다(속도가 0이면 이 값이 안 곱해지므로). -->
+      <div id="beta-row">
+        <span id="beta-val"></span>
+        <input type="range" id="beta-slider" min="0" max="30" step="0.5">
+      </div>
+    </div>
+  </div>
+  <canvas id="hand-cam"></canvas>
+  <div id="hint">1 / 2 로 전환 · 마우스로 조작하거나 ✋ 를 켜세요</div>
 
-    function fit() {
-      const dpr = Math.max(1, window.devicePixelRatio || 1);
-      canvas.width  = Math.floor(canvas.clientWidth  * dpr);
-      canvas.height = Math.floor(canvas.clientHeight * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    }
-    addEventListener('resize', fit, { passive:true });
-    fit();
+<script type="module">
+// ─────────────────────────────────────────────────────────────────────────────
+// 껍데기 — 카메라와 시간을 쥐고, 장면만 갈아끼운다.
+//
+// 왜 한 페이지인가: 장면마다 페이지를 나누면 전환할 때마다 MediaPipe(18MB)를 다시 초기화하고
+// 카메라를 다시 열어야 한다. 1초쯤 끊기고 보정값(여기가 기준)도 날아간다. 껍데기가 카메라를
+// 쥐고 있으면 전환이 즉시고, 두 작품이 같은 손을 공유한다.
+//
+// ★ sample() 은 프레임당 딱 한 번만 부른다. 이 함수는 부를 때마다 렌더용 위치를 시간에 따라
+//   굴리므로(톱니 제거), 작품·HUD·미리보기가 각자 부르면 같은 일을 세 번 하게 된다.
+// ─────────────────────────────────────────────────────────────────────────────
+import { HandSource, TUNE as HTUNE, palmsOf } from './hand/hand-source.js';
+import * as particles from './scenes/particles.js';
+import * as threads from './scenes/threads.js';
 
-    const particles = [];
-    const MAX_PARTICLES = 40000;
+const scenes = [
+  particles.create(document.getElementById('stage-particles')),
+  threads.create(document.getElementById('stage-threads')),
+];
+let cur = 0;
+let hands = null;
 
-    const GAP_HALF = 1.5; // ±1.5° → 총 3도
-    function isForbiddenDeg(deg) {
-      let m = ((deg % 360) + 360) % 360;
-      let mod = m % 30;
-      return (mod <= GAP_HALF) || (mod >= 30 - GAP_HALF);
-    }
+// ── 장면 전환 ──
+const items = [...document.querySelectorAll('.menu-item')];
+const hint = document.getElementById('hint');
+let hintHidden = false;
 
-    function pickColor() {
-      const r = Math.random();
-      let acc = 0;
-      for (const c of COLORS) {
-        acc += c.w;
-        if (r <= acc) return c.hex;
-      }
-      return COLORS[0].hex;
-    }
+function show(i) {
+  if (i === cur || !scenes[i]) return;
+  scenes[cur].deactivate?.();          // 떠나는 장면은 상태를 되돌린다 (돌아왔을 때 잔해 없게)
+  cur = i;
+  scenes.forEach((s, n) => s.canvas.classList.toggle('on', n === i));
+  items.forEach((el, n) => el.classList.toggle('on', n === i));
+  scenes[i].resize();                  // 숨어 있는 동안 창이 바뀌었을 수 있다
+}
+items.forEach((el, i) => el.addEventListener('click', () => show(i)));
+addEventListener('keydown', (e) => {
+  if (e.key === '1') show(0);
+  if (e.key === '2') show(1);
+});
+addEventListener('resize', () => scenes.forEach(s => s.resize()));
 
-    let spawning = false;
-    let spawnX = 0, spawnY = 0;
-    function setSpawnPoint(px, py) { spawnX = px; spawnY = py; }
+// ── 시간 기준 ──
+// 두 작품 다 원래는 프레임 기준이었다 — dt가 없어서 화면 주사율이 곧 작품 속도였다.
+// (실측: 입자가 60Hz 893px/초 vs 120Hz 1787px/초. 갤러리 프로젝터는 대개 60Hz다.)
+// k = 이번 프레임이 60Hz 한 프레임의 몇 배인가. 60Hz면 1 = 원본과 완전히 동일.
+const REF_DT = 1000 / 60, MAX_K = 3;   // MAX_K: 탭이 멈췄다 돌아올 때 폭주 방지
+let fps = 60, lastT = 0;
 
-    // 마우스 이벤트
-    canvas.addEventListener('mousedown', e => {
-      spawning = true;
-      const rect = canvas.getBoundingClientRect();
-      setSpawnPoint(e.clientX - rect.left, e.clientY - rect.top);
-    });
-    addEventListener('mouseup', () => spawning = false);
-    canvas.addEventListener('mousemove', e => {
-      if (!spawning) return;
-      const rect = canvas.getBoundingClientRect();
-      setSpawnPoint(e.clientX - rect.left, e.clientY - rect.top);
-    });
+function loop(now) {
+  requestAnimationFrame(loop);
+  let k = 1;
+  if (lastT) {
+    const dt = now - lastT;
+    if (dt > 0) { fps = fps * 0.9 + (1000 / dt) * 0.1; k = Math.min(dt / REF_DT, MAX_K); }
+  }
+  lastT = now;
 
-    // 터치 이벤트
-    canvas.addEventListener('touchstart', e => {
-      e.preventDefault();
-      spawning = true;
-      const t = e.changedTouches[0];
-      const rect = canvas.getBoundingClientRect();
-      setSpawnPoint(t.clientX - rect.left, t.clientY - rect.top);
-    }, { passive:false });
-    canvas.addEventListener('touchmove', e => {
-      if (!spawning) return;
-      const t = e.changedTouches[0];
-      const rect = canvas.getBoundingClientRect();
-      setSpawnPoint(t.clientX - rect.left, t.clientY - rect.top);
-    }, { passive:true });
-    addEventListener('touchend', () => spawning = false, { passive:true });
-    addEventListener('mouseleave', () => spawning = false);
+  // ★ 프레임당 한 번. 어트랙터(손바닥+손끝)는 실뭉치가, 손 목록은 입자와 HUD가 쓴다.
+  const attractors = hands && hands.state === 'ready' ? hands.sample(now) : null;
+  const palms = attractors ? palmsOf(attractors) : null;
 
-    const RING_RADIUS = 300; // 반경
+  scenes[cur].frame(now, k, cur === 1 ? attractors : palms);
 
-    // 입자 생성
-    function spawnParticles(x, y, count = 120) { // 수 절반 ↓
-      if (particles.length > MAX_PARTICLES) return;
+  drawCam(palms);
+  if (!hintHidden && palms && palms.length) { hint.style.opacity = '0'; hintHidden = true; }
+}
+requestAnimationFrame(loop);
 
-      for (let i = 0; i < count; i++) {
-        let deg;
-        for (let tries = 0; tries < 12; tries++) {
-          deg = Math.random() * 360;
-          if (!isForbiddenDeg(deg)) break;
-        }
-        const rad = deg * Math.PI / 180;
-        const px = x + Math.cos(rad) * RING_RADIUS;
-        const py = y + Math.sin(rad) * RING_RADIUS;
-        const speed = 12 + Math.random() * 6;
-        const vx = Math.cos(rad) * speed;
-        const vy = Math.sin(rad) * speed;
+// ── 손 인식 UI ──
+const btn = document.getElementById('hand-btn');
+const stat = document.getElementById('hand-stat');
+const meter = document.getElementById('grab-meter');
+const bar = document.getElementById('grab-bar');
+const fill = document.getElementById('grab-fill');
+const cam = document.getElementById('hand-cam');
+const cctx = cam.getContext('2d');
+const scaleVal = document.getElementById('scale-val');
+const calBtn = document.getElementById('cal-btn');
+const betaSlider = document.getElementById('beta-slider');
+const betaVal = document.getElementById('beta-val');
 
-        const r  = 3 + Math.random() * 6; // 크기 두 배 ↑ (6~12px)
+// 막대 위에 임계값 두 개를 표시 — 자기 손이 어디쯤인지 보여야 튜닝이 감이 아니라 눈이 된다
+const LO = 0.7, HI = 1.9;
+const pos = v => ((v - LO) / (HI - LO)) * 100;
+for (const v of [HTUNE.grabOn, HTUNE.grabOff]) {
+  const m = document.createElement('div');
+  m.className = 'grab-mark'; m.style.left = pos(v) + '%';
+  bar.appendChild(m);
+}
 
-        particles.push({
-          x: px, y: py, vx, vy,
-          r,
-          color: pickColor(),
-          alpha: 0.8 + Math.random() * 0.2,
-          life: 0,
-          maxLife: 30 + Math.random()*10
-        });
-      }
-    }
+// beta = 빠를 때 얼마나 잘 따라오는가. 실측: 0.007 → 540px 뒤처짐 / 10 → 109px.
+// 필터는 살아있는 인스턴스가 값을 들고 있으므로 트랙에 직접 밀어넣어야 반영된다.
+const setBeta = (v) => {
+  HTUNE.beta = v;
+  betaVal.textContent = `따라오기 ${v.toFixed(1)}`;
+  if (!hands) return;
+  for (const [, t] of hands.tracks)
+    for (const f of [t.px, t.py, ...t.tx, ...t.ty]) f.beta = v;
+};
+betaSlider.value = HTUNE.beta;
+setBeta(HTUNE.beta);
+betaSlider.addEventListener('input', () => setBeta(parseFloat(betaSlider.value)));
 
-    function tick() {
-      requestAnimationFrame(tick);
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+// 기준 거리는 카메라 화각마다 달라서 코드가 정할 수 없다. 그 자리에서 맞춘다.
+calBtn.addEventListener('click', () => {
+  if (!hands) return;
+  const h = hands.sampleHands(performance.now())[0];
+  if (!h || !h.size) { scaleVal.textContent = '손이 안 보임'; return; }
+  HTUNE.sizeRef = h.size;
+  scaleVal.textContent = `기준 = ${h.size.toFixed(3)}`;
+});
 
-      if (spawning) spawnParticles(spawnX, spawnY, 120); // 수 절반 ↓
+function paint() {
+  if (!hands) { stat.textContent = ''; stat.classList.remove('err'); meter.classList.remove('on'); return; }
+  const i = hands.info();
+  stat.classList.toggle('err', i.state === 'error');
+  if (i.state === 'error') { stat.textContent = '오류: ' + i.error; meter.classList.remove('on'); return; }
+  if (i.state !== 'ready') { stat.textContent = '카메라/모델 로드 중…'; return; }
+  const hs = hands.sampleHands(performance.now());
+  const grabbing = hs.filter(h => h.grab).length;
+  const c = i.camera ? `${i.camera.w}×${i.camera.h}` : '?';
+  stat.textContent =
+      `손 ${hs.length}개 · 움켜쥠 ${grabbing}개\n`
+    + `화면 ${fps.toFixed(0)}fps · ${scenes[cur].stats()}\n`
+    // ★ 순간이동의 원인을 가르는 두 숫자.
+    //   카메라 = 검출 이면 카메라가 천장(워커 늘려도 무의미) / 카메라 > 검출 이면 처리량이 천장
+    + `카메라 ${i.captureFps}장/초 (${c})\n`
+    + `검출 ${i.detectFps}회/초 · ${i.detectMs.toFixed(0)}ms · 버림 ${i.droppedPct}%`;
+  meter.classList.toggle('on', hs.length > 0);
+  if (hs.length) {
+    const h = hs[0];
+    fill.style.width = Math.max(0, Math.min(100, pos(h.openness))) + '%';
+    fill.classList.toggle('grab', h.grab);
+    // 배율이 상·하한에 붙어 있으면 알려준다 — 안 그러면 "왜 더 안 커지지?" 로 헤맨다
+    const at = h.scale <= HTUNE.sizeMin + 1e-6 ? ' (최소)'
+             : h.scale >= HTUNE.sizeMax - 1e-6 ? ' (최대)' : '';
+    scaleVal.textContent = `배율 ${h.scale.toFixed(2)}×${at}`;
+  }
+}
+setInterval(paint, 100);
 
-      for (let i = particles.length - 1; i >= 0; i--) {
-        const p = particles[i];
-        p.x  += p.vx;
-        p.y  += p.vy;
-        p.life++;
+btn.addEventListener('click', async () => {
+  if (hands) {
+    hands.stop(); hands = null;
+    btn.textContent = '✋ 손으로 조작'; btn.classList.remove('on');
+    cam.classList.remove('on'); paint();
+    return;
+  }
+  hands = new HandSource();
+  hands.onstate = paint;
+  btn.textContent = '■ 끄기'; btn.classList.add('on');
+  cam.classList.add('on');
+  await hands.start();
+  paint();
+});
 
-        const scale = 1 - (p.life / p.maxLife);
-        const currentR = p.r * Math.max(scale, 0);
+// 카메라 미리보기 — 인식 영역(파랑)과 손바닥(움켜쥐면 빨강)
+function drawCam(palms) {
+  if (!cam.classList.contains('on') || !hands || !hands.video || !hands.video.videoWidth) return;
+  const v = hands.video, W = 200, H = Math.round(W * v.videoHeight / v.videoWidth);
+  if (cam.width !== W) { cam.width = W; cam.height = H; cam.style.height = H + 'px'; }
+  cctx.save();
+  if (HTUNE.mirror) { cctx.translate(W, 0); cctx.scale(-1, 1); }
+  cctx.drawImage(v, 0, 0, W, H);
+  cctx.restore();
+  const x0 = (HTUNE.mirror ? 1 - HTUNE.ax1 : HTUNE.ax0) * W;
+  const x1 = (HTUNE.mirror ? 1 - HTUNE.ax0 : HTUNE.ax1) * W;
+  cctx.strokeStyle = 'rgba(93,196,230,.9)'; cctx.lineWidth = 1;
+  cctx.strokeRect(x0, HTUNE.ay0 * H, x1 - x0, (HTUNE.ay1 - HTUNE.ay0) * H);
+  if (!palms) return;
+  for (const h of palms) {
+    const sx = (HTUNE.mirror ? 1 - (HTUNE.ax0 + h.nx * (HTUNE.ax1 - HTUNE.ax0))
+                             : (HTUNE.ax0 + h.nx * (HTUNE.ax1 - HTUNE.ax0))) * W;
+    const sy = (HTUNE.ay0 + h.ny * (HTUNE.ay1 - HTUNE.ay0)) * H;
+    cctx.beginPath(); cctx.arc(sx, sy, h.grab ? 8 : 5, 0, 6.2832);
+    cctx.fillStyle = h.grab ? 'rgba(232,81,96,.9)' : 'rgba(255,255,255,.5)';
+    cctx.fill();
+  }
+}
 
-        ctx.globalAlpha = p.alpha;
-        ctx.fillStyle = p.color;
-        ctx.beginPath();
-        ctx.ellipse(
-          p.x, p.y,
-          currentR * 1.5,
-          currentR * 0.7,
-          Math.atan2(p.vy, p.vx),
-          0, Math.PI * 2
-        );
-        ctx.fill();
-
-        if (p.life > p.maxLife ||
-            p.x < -20 || p.y < -20 ||
-            p.x > canvas.clientWidth + 20 ||
-            p.y > canvas.clientHeight + 20) {
-          particles.splice(i, 1);
-        }
-      }
-    }
-    tick();
-  })();
-  </script>
+// 튜닝/검증용
+window.__app = {
+  get hands() { return hands; },
+  set hands(v) { hands = v; },
+  get scene() { return scenes[cur]; },
+  get sceneIndex() { return cur; },
+  show, scenes, TUNE: HTUNE,
+  get fps() { return fps; },
+};
+</script>
 </body>
 </html>
