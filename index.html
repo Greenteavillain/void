@@ -6,8 +6,20 @@
   <title>홖 — 손으로 만지는 것들</title>
   <style>
     html, body { height: 100%; margin: 0; background:#000; overflow:hidden; }
-    .stage { position: fixed; inset: 0; display: none; width: 100%; height: 100%; }
+    /* touch-action/cursor 는 원본에 있던 것 — 옮기면서 빠뜨렸다가 되살림 */
+    .stage {
+      position: fixed; inset: 0; display: none; width: 100%; height: 100%;
+      touch-action: none; cursor: crosshair;
+    }
     .stage.on { display: block; }
+
+    /* ── Tab = 전시 모드 ── 작품만 남기고 전부 숨긴다. 손 인식은 계속 돈다(화면만 사라짐). */
+    body.bare #menu,
+    body.bare #hand-ui,
+    body.bare #hand-cam,
+    body.bare #panel,
+    body.bare #hint { display: none !important; }
+    body.bare .stage { cursor: none; }
 
     /* ── 메뉴 ── 작품을 가리지 않게 최소한으로 */
     #menu {
@@ -68,6 +80,73 @@
     #hand-cam { position: fixed; right: 14px; bottom: 14px; z-index: 10; width: 200px;
       border-radius: 8px; border: 1px solid rgba(255,255,255,.14); display: none; }
     #hand-cam.on { display: block; }
+    .ctl-check {
+      display: flex; align-items: center; gap: 6px; margin-top: 9px;
+      font-size: 11px; color: rgba(255,255,255,.55); cursor: pointer;
+    }
+    .ctl-check input { accent-color: #5DC4E6; }
+
+    /* ── 조절 패널 (2번 장면 전용) ── 원본 thread field 의 것 그대로 */
+    #panel {
+      position: fixed; top: 14px; right: 14px; z-index: 20; display: none;
+      font: 12px -apple-system, system-ui, sans-serif; color: rgba(255,255,255,.78);
+      user-select: none;
+    }
+    #panel.on { display: block; }
+    #panel-toggle {
+      width: 34px; height: 34px; padding: 0; border-radius: 9px; margin-left: auto;
+      background: rgba(18,18,22,.62); border: 1px solid rgba(255,255,255,.14);
+      color: rgba(255,255,255,.72); font-size: 16px; cursor: pointer; line-height: 1;
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      display: flex; align-items: center; justify-content: center;
+      transition: background .2s ease;
+    }
+    #panel-toggle:hover { background: rgba(30,30,36,.8); }
+    #panel-body {
+      margin-top: 8px; padding: 15px 15px 13px; width: 208px;
+      background: rgba(18,18,22,.62); border: 1px solid rgba(255,255,255,.14);
+      border-radius: 11px; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+      display: none;
+    }
+    #panel-body.open { display: block; }
+    .ctl { display: grid; grid-template-columns: 1fr auto;
+      grid-template-areas: "name val" "slider slider"; align-items: center; }
+    .ctl + .ctl { margin-top: 15px; }
+    .ctl-name { grid-area: name; letter-spacing: .03em; }
+    .ctl-val { grid-area: val; font-variant-numeric: tabular-nums;
+      color: rgba(255,255,255,.5); font-size: 11px; }
+    .ctl input[type=range] {
+      grid-area: slider; -webkit-appearance: none; appearance: none;
+      width: 100%; height: 3px; margin: 9px 0 2px; outline: none; cursor: pointer;
+      background: rgba(255,255,255,.18); border-radius: 2px;
+    }
+    .ctl input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none; width: 14px; height: 14px;
+      border-radius: 50%; background: #58c2e5; border: none; cursor: pointer;
+    }
+    /* 밀어내기/당김 비율 잠금 그룹 */
+    .link-group { display: flex; align-items: stretch; gap: 6px; margin-top: 15px; }
+    .link-rows { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 15px; }
+    .link-rows .ctl { margin-top: 0; }
+    .link-btn {
+      flex: 0 0 30px; position: relative; align-self: stretch; padding: 0;
+      display: flex; align-items: center; justify-content: flex-end;
+      background: transparent; border: none; color: rgba(255,255,255,.32); cursor: pointer;
+      transition: color .2s ease;
+    }
+    .link-btn::before {
+      content: ''; position: absolute; left: 4px; top: 9px; bottom: 9px; width: 9px;
+      border: 1.5px solid currentColor; border-left: none; border-radius: 0 6px 6px 0; opacity: .55;
+    }
+    .link-btn:hover { color: rgba(255,255,255,.6); }
+    .link-btn.on { color: #58c2e5; }
+    .link-btn svg { position: relative; z-index: 1; }
+    #panel-reset {
+      width: 100%; margin-top: 15px; padding: 5px; border-radius: 6px; font: inherit; font-size: 11px;
+      background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.16);
+      color: rgba(255,255,255,.6); cursor: pointer;
+    }
+    #panel-reset:hover { background: rgba(255,255,255,.16); color: #fff; }
 
     #hint {
       position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 5;
@@ -103,9 +182,59 @@
         <input type="range" id="beta-slider" min="0" max="30" step="0.5">
       </div>
     </div>
+    <label class="ctl-check"><input type="checkbox" id="cam-preview" checked> <span>카메라 미리보기</span></label>
   </div>
   <canvas id="hand-cam"></canvas>
-  <div id="hint">1 / 2 로 전환 · 마우스로 조작하거나 ✋ 를 켜세요</div>
+
+  <!-- 조절 패널 — 2번 장면(실뭉치) 전용. 원본 thread field 의 것 그대로. -->
+  <div id="panel">
+    <button id="panel-toggle" aria-label="조절 패널 열기/닫기">⚙</button>
+    <div id="panel-body">
+      <label class="ctl">
+        <span class="ctl-name">실 굵기</span>
+        <span class="ctl-val" id="val-line"></span>
+        <input type="range" id="ctl-line" min="0.3" max="4" step="0.05">
+      </label>
+      <label class="ctl">
+        <span class="ctl-name">손/커서 범위</span>
+        <span class="ctl-val" id="val-radius"></span>
+        <input type="range" id="ctl-radius" min="40" max="450" step="5">
+      </label>
+      <div class="link-group">
+        <div class="link-rows">
+          <label class="ctl">
+            <span class="ctl-name">밀어내기</span>
+            <span class="ctl-val" id="val-push"></span>
+            <input type="range" id="ctl-push" min="0" max="5" step="0.05">
+          </label>
+          <label class="ctl">
+            <span class="ctl-name">당김</span>
+            <span class="ctl-val" id="val-brush"></span>
+            <input type="range" id="ctl-brush" min="0" max="1.2" step="0.01">
+          </label>
+        </div>
+        <button class="link-btn" id="link-toggle" aria-label="밀어내기·당김 비율 잠금" title="비율 잠금">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 12h6"/>
+            <path d="M10.5 8.5H8a3.5 3.5 0 0 0 0 7h2.5"/>
+            <path d="M13.5 8.5H16a3.5 3.5 0 0 1 0 7h-2.5"/>
+          </svg>
+        </button>
+      </div>
+      <label class="ctl">
+        <span class="ctl-name">부유 강도</span>
+        <span class="ctl-val" id="val-float"></span>
+        <input type="range" id="ctl-float" min="0" max="12" step="0.25">
+      </label>
+      <label class="ctl">
+        <span class="ctl-name">복원 속도</span>
+        <span class="ctl-val" id="val-spring"></span>
+        <input type="range" id="ctl-spring" min="0.008" max="0.15" step="0.001">
+      </label>
+      <button id="panel-reset">기본값으로</button>
+    </div>
+  </div>
+  <div id="hint">1 / 2 로 전환 · Tab 으로 화면만 보기 · 마우스로 조작하거나 ✋ 를 켜세요</div>
 
 <script type="module">
 // ─────────────────────────────────────────────────────────────────────────────
@@ -141,11 +270,15 @@ function show(i) {
   scenes.forEach((s, n) => s.canvas.classList.toggle('on', n === i));
   items.forEach((el, n) => el.classList.toggle('on', n === i));
   scenes[i].resize();                  // 숨어 있는 동안 창이 바뀌었을 수 있다
+  document.getElementById('panel').classList.toggle('on', i === 1);   // 조절 패널은 실뭉치 전용
 }
 items.forEach((el, i) => el.addEventListener('click', () => show(i)));
 addEventListener('keydown', (e) => {
   if (e.key === '1') show(0);
   if (e.key === '2') show(1);
+  // Tab = 전시 모드. 작품만 남기고 UI·카메라 미리보기를 전부 숨긴다.
+  // 손 인식은 계속 돈다 — 화면에서만 사라진다. (기본 동작인 포커스 이동은 막는다)
+  if (e.key === 'Tab') { e.preventDefault(); document.body.classList.toggle('bare'); }
 });
 addEventListener('resize', () => scenes.forEach(s => s.resize()));
 
@@ -259,7 +392,7 @@ btn.addEventListener('click', async () => {
   hands = new HandSource();
   hands.onstate = paint;
   btn.textContent = '■ 끄기'; btn.classList.add('on');
-  cam.classList.add('on');
+  cam.classList.toggle('on', camChk.checked);
   await hands.start();
   paint();
 });
@@ -287,6 +420,87 @@ function drawCam(palms) {
     cctx.fill();
   }
 }
+
+// ── 카메라 미리보기 켜기/끄기 ──
+// 작품을 가리므로 끌 수 있어야 한다. 끄더라도 손 인식은 계속 돈다 — 화면에서만 사라진다.
+const camChk = document.getElementById('cam-preview');
+camChk.addEventListener('change', () => cam.classList.toggle('on', camChk.checked && !!hands));
+
+// ── 조절 패널 (2번 장면 전용) ── 원본 thread field 의 것 그대로
+(function panelUI() {
+  const th = scenes[1], P = th.P;
+  const DEFAULTS = { ...P };            // "기본값으로" 를 위해 시작값을 붙잡아둔다
+  const $ = (id) => document.getElementById(id);
+  const cLine = $('ctl-line'), cRad = $('ctl-radius');
+  const cPush = $('ctl-push'), cBrush = $('ctl-brush'), cFloat = $('ctl-float'), cSpring = $('ctl-spring');
+  const vLine = $('val-line'), vRad = $('val-radius');
+  const vPush = $('val-push'), vBrush = $('val-brush'), vFloat = $('val-float'), vSpring = $('val-spring');
+  const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
+  const PUSH_MIN = 0, PUSH_MAX = 5, BR_MIN = 0, BR_MAX = 1.2;
+
+  // 현재 값으로 초기화 (작은 화면이면 radius 가 이미 120으로 내려가 있다)
+  function sync() {
+    cLine.value = P.line;       vLine.textContent = (+P.line).toFixed(2) + ' px';
+    cRad.value = P.radius;      vRad.textContent = Math.round(P.radius);
+    cPush.value = P.push;       vPush.textContent = (+P.push).toFixed(2);
+    cBrush.value = P.brush;     vBrush.textContent = (+P.brush).toFixed(2);
+    cFloat.value = P.floatAmp;  vFloat.textContent = (+P.floatAmp).toFixed(1);
+    cSpring.value = P.restK;    vSpring.textContent = (+P.restK).toFixed(3);
+  }
+  sync();
+
+  cLine.addEventListener('input', () => {
+    P.line = parseFloat(cLine.value); vLine.textContent = P.line.toFixed(2) + ' px';
+  });
+  cRad.addEventListener('input', () => {
+    P.radius = parseFloat(cRad.value); vRad.textContent = Math.round(P.radius);
+  });
+  cFloat.addEventListener('input', () => {
+    P.floatAmp = parseFloat(cFloat.value); vFloat.textContent = P.floatAmp.toFixed(1);
+  });
+  cSpring.addEventListener('input', () => {
+    P.restK = parseFloat(cSpring.value); vSpring.textContent = P.restK.toFixed(3);
+  });
+
+  // ── 밀어내기/당김 + 비율 잠금(체인) ──
+  let linkOn = false;
+  let prevPush = P.push, prevBrush = P.brush;   // 직전 값(비율 계산용)
+  const setPush  = (v) => { P.push = v;  cPush.value = v;  vPush.textContent = v.toFixed(2); };
+  const setBrush = (v) => { P.brush = v; cBrush.value = v; vBrush.textContent = v.toFixed(2); };
+
+  cPush.addEventListener('input', () => {
+    const np = parseFloat(cPush.value);
+    if (linkOn && prevPush > 0.0001) {           // 같은 배율로 당김도 이동
+      setBrush(clamp(prevBrush * (np / prevPush), BR_MIN, BR_MAX));
+    }
+    P.push = np; vPush.textContent = np.toFixed(2);
+    prevPush = P.push; prevBrush = P.brush;
+  });
+  cBrush.addEventListener('input', () => {
+    const nb = parseFloat(cBrush.value);
+    if (linkOn && prevBrush > 0.0001) {          // 같은 배율로 밀어내기도 이동
+      setPush(clamp(prevPush * (nb / prevBrush), PUSH_MIN, PUSH_MAX));
+    }
+    P.brush = nb; vBrush.textContent = nb.toFixed(2);
+    prevPush = P.push; prevBrush = P.brush;
+  });
+
+  const link = $('link-toggle');
+  link.addEventListener('click', () => {
+    linkOn = !linkOn;
+    link.classList.toggle('on', linkOn);
+    prevPush = P.push; prevBrush = P.brush;      // 잠그는 순간의 비율을 기준으로
+  });
+
+  $('panel-reset').addEventListener('click', () => {
+    Object.assign(P, DEFAULTS);
+    prevPush = P.push; prevBrush = P.brush;
+    sync();
+  });
+
+  const tgl = $('panel-toggle'), body = $('panel-body');
+  tgl.addEventListener('click', () => body.classList.toggle('open'));
+})();
 
 // 튜닝/검증용
 window.__app = {

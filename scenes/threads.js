@@ -41,7 +41,7 @@ export function create(canvas) {
     floatAmp: 1.25,    // 가만히 있을 때 부유 진폭
     floatF1: 0.00055, floatF2: 0.00102,
 
-    line: 0.78,        // 실 두께 (css px, 스케일 무관 고정)
+    line: 0.35,        // 실 두께 (css px, 스케일 무관 고정)
     aWhite: 1.0, aCyan: 1.0, aRed: 1.0,
     margin: 0.94       // 화면 대비 그림 크기 (여백)
   };
@@ -169,6 +169,7 @@ export function create(canvas) {
     canvas,
     loaded,
     resize,
+    P,          // 조절 패널이 직접 만진다 (값을 바꾸면 다음 프레임부터 적용)
     get ready() { return ready; },
     stats: () => ready ? `실 ${N.toLocaleString()}점` : '실을 엮는 중…',
     /** 장면을 떠날 때 — 실을 제자리로 돌려놔서 돌아왔을 때 휘저은 자국이 안 남게 */
@@ -341,6 +342,7 @@ export function create(canvas) {
       P,
       get N() { return N; },
       get AN() { return AN; },
+      get view() { return { cssW, cssH, dpr, scale, ox, oy }; },
       setSkipRender: (v) => { SKIP_RENDER = v; },
       maxDisp() {
         let m = 0;
