@@ -460,6 +460,60 @@ h2('움켜쥐기 상태 전이 (슈미트 트리거)');
   ok('★ 임계값에서 떨리는 손에도 점멸하지 않음', flips <= 1, `2초간 전환 ${flips}회`);
 }
 
+// ── 8b. 미리보기 점 좌표 (좌우반전) ──────────────────────────────────────────
+// 증상: "웹캠 미리보기의 빨간 동그라미가 좌우반전되어야 할 것 같다".
+// map() 이 이미 미러를 적용해 nx 를 만드는데(m = 1 - 영상x), 미리보기도 영상을 미러로 그린다.
+// 그래서 점 좌표에 미러를 한 번 더 걸면 **이중 미러**가 되어 반대편에 찍힌다.
+// 둘이 상쇄되므로 화면 좌표는 m·W 하나뿐이다 — 미러 여부와 무관.
+h2('미리보기 점 좌표 (좌우반전)');
+{
+  const W = 200;
+  const toPX = (nx) => (TUNE.ax0 + nx * (TUNE.ax1 - TUNE.ax0)) * W;   // 앱이 쓰는 식
+  const 이중미러 = (nx) => (1 - (TUNE.ax0 + nx * (TUNE.ax1 - TUNE.ax0))) * W;  // 고치기 전 식
+
+  const mk = (x) => { const lm = []; for (let i = 0; i < 21; i++) lm.push({ x, y: 0.5 });
+    lm[0] = {x, y:0.5}; lm[9] = {x, y:0.5-0.18}; return lm; };
+  const W6 = [{x:0,y:0,z:0},{x:0,y:-0.09,z:0}]; for (let i=0;i<4;i++) W6.push({x:0,y:-1.75*0.09,z:0});
+
+  const save = { ax0: TUNE.ax0, ax1: TUNE.ax1, ay0: TUNE.ay0, ay1: TUNE.ay1, mirror: TUNE.mirror };
+  // ★ 좌우 비대칭 활성영역으로 재야 한다 — 0.15/0.85 처럼 대칭이면 버그가 상쇄돼 안 보인다
+  //   (실제로 사각형은 같은 버그였는데 대칭이라 아무도 눈치 못 챘다)
+  TUNE.ax0 = 0.10; TUNE.ax1 = 0.70; TUNE.ay0 = 0; TUNE.ay1 = 1; TUNE.mirror = true;
+
+  // ★ 손이 활성영역 **안**에 있어야 한다 — 밖이면 clamp01 에 잘려서 좌표가 안 맞고,
+  //   그건 미러 버그가 아니라 잘림이다. (실제로 0.25 로 뒀다가 m=0.75 가 [0.1,0.7] 밖이라 헛짚었다)
+  //   그러면서 좌우 비대칭이어야 이중 미러 버그가 드러난다 (0.5 는 대칭이라 버그가 상쇄된다).
+  const VIDEO_X = 0.40;                 // 미러하면 m=0.60 → 활성영역 [0.10,0.70] 안, 그리고 비대칭
+  const s = new HandSource();
+  let t = 2e6;
+  for (let i = 0; i < 60; i++) { s._push([mk(VIDEO_X)], ['Left'], t, t, [W6], 1); s.sample(t); t += 16.7; }
+  const h = s.sampleHands(t)[0];
+
+  // 미리보기는 영상을 미러로 그리므로, 영상 x=0.40 인 손은 화면 (1-0.40)*W 에 보인다
+  const 손이_보이는_자리 = (1 - VIDEO_X) * W;
+  ok('검사 조건: 활성영역이 좌우 비대칭이다 (대칭이면 버그가 상쇄된다)',
+     Math.abs((TUNE.ax0 + TUNE.ax1) - 1) > 0.05, `ax0=${TUNE.ax0} ax1=${TUNE.ax1}`);
+  ok('검사 조건: 손이 활성영역 안이라 clamp 에 안 잘렸다', h.nx > 0.02 && h.nx < 0.98,
+     `nx=${h.nx.toFixed(3)}`);
+  ok('★ 점이 영상 속 손과 같은 자리에 찍힌다', Math.abs(toPX(h.nx) - 손이_보이는_자리) < 3,
+     `점 ${toPX(h.nx).toFixed(1)}px vs 손 ${손이_보이는_자리.toFixed(1)}px`);
+  ok('★ 고치기 전 식(이중 미러)은 반대편에 찍혔다 (검사 자체의 검사)',
+     Math.abs(이중미러(h.nx) - 손이_보이는_자리) > 30,
+     `이중미러 ${이중미러(h.nx).toFixed(1)}px — ${Math.abs(이중미러(h.nx)-손이_보이는_자리).toFixed(0)}px 어긋남`);
+
+  // 미러를 끈 경우도 같은 식이어야 한다
+  TUNE.mirror = false;
+  const s2 = new HandSource();
+  let t2 = 2.1e6;
+  for (let i = 0; i < 60; i++) { s2._push([mk(VIDEO_X)], ['Left'], t2, t2, [W6], 1); s2.sample(t2); t2 += 16.7; }
+  const h2b = s2.sampleHands(t2)[0];
+  ok('미러 꺼도 같은 식으로 맞는다 (분기가 필요없다)',
+     Math.abs(toPX(h2b.nx) - VIDEO_X * W) < 3,
+     `점 ${toPX(h2b.nx).toFixed(1)}px vs 손 ${(VIDEO_X*W).toFixed(1)}px`);
+
+  Object.assign(TUNE, save);
+}
+
 // ── 9. 거리 → 배율 ──────────────────────────────────────────────────────────
 // 손이 멀면 작게 찍힌다. 그 "찍힌 크기"가 곧 거리다.
 // 검증 방법: 같은 사진을 축소해서 넣는다 = 손이 그만큼 멀어진 것과 같다.

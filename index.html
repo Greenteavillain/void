@@ -406,16 +406,21 @@ function drawCam(palms) {
   if (HTUNE.mirror) { cctx.translate(W, 0); cctx.scale(-1, 1); }
   cctx.drawImage(v, 0, 0, W, H);
   cctx.restore();
-  const x0 = (HTUNE.mirror ? 1 - HTUNE.ax1 : HTUNE.ax0) * W;
-  const x1 = (HTUNE.mirror ? 1 - HTUNE.ax0 : HTUNE.ax1) * W;
+
+  // ★ 여기에 미러 분기를 넣으면 안 된다 — 두 번 뒤집혀서 점이 반대편에 찍힌다.
+  //   hand-source 의 map() 이 이미 미러를 적용해 nx 를 만들고(m = 1 - 영상x),
+  //   미리보기도 영상을 미러로 그린다(화면x = (1 - 영상x)·W). 둘이 정확히 상쇄된다:
+  //     m = ax0 + nx·(ax1-ax0)   →   영상x = 1 - m   →   화면x = (1 - 영상x)·W = m·W
+  //   즉 미러든 아니든 화면 좌표는 m·W 하나뿐이다.
+  //   (사각형도 같은 버그였는데 ax0/ax1 이 0.15/0.85 로 좌우 대칭이라 우연히 안 보였다)
+  const toPreviewX = (nx) => (HTUNE.ax0 + nx * (HTUNE.ax1 - HTUNE.ax0)) * W;
+  const toPreviewY = (ny) => (HTUNE.ay0 + ny * (HTUNE.ay1 - HTUNE.ay0)) * H;
+
   cctx.strokeStyle = 'rgba(93,196,230,.9)'; cctx.lineWidth = 1;
-  cctx.strokeRect(x0, HTUNE.ay0 * H, x1 - x0, (HTUNE.ay1 - HTUNE.ay0) * H);
+  cctx.strokeRect(toPreviewX(0), toPreviewY(0), toPreviewX(1) - toPreviewX(0), toPreviewY(1) - toPreviewY(0));
   if (!palms) return;
   for (const h of palms) {
-    const sx = (HTUNE.mirror ? 1 - (HTUNE.ax0 + h.nx * (HTUNE.ax1 - HTUNE.ax0))
-                             : (HTUNE.ax0 + h.nx * (HTUNE.ax1 - HTUNE.ax0))) * W;
-    const sy = (HTUNE.ay0 + h.ny * (HTUNE.ay1 - HTUNE.ay0)) * H;
-    cctx.beginPath(); cctx.arc(sx, sy, h.grab ? 8 : 5, 0, 6.2832);
+    cctx.beginPath(); cctx.arc(toPreviewX(h.nx), toPreviewY(h.ny), h.grab ? 8 : 5, 0, 6.2832);
     cctx.fillStyle = h.grab ? 'rgba(232,81,96,.9)' : 'rgba(255,255,255,.5)';
     cctx.fill();
   }
