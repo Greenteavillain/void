@@ -75,6 +75,30 @@ export function create(canvas) {
   let strokes = [];                            // {start, count, color}
   let N = 0, ready = false;
 
+  // ── 움켜쥐기 (치대기) ──
+  // 주먹을 쥐면 반경 안의 실이 주먹에 잡힌다: 잡힌 점의 스프링 목표가 제자리 대신
+  // "주먹 + 잡던 순간의 오프셋 × 오므림"이 된다. 끌면 실이 제자리 스프링과 주먹 사이에서
+  // 늘어나고, 펴는 순간 목표가 제자리로 돌아가 전부 샤라락 튕겨 돌아간다 — 이게 보상.
+  //
+  // ★ 오프셋을 "잡던 순간의 현재 위치" 기준으로 저장하므로 잡는 순간엔 목표 = 현위치,
+  //   즉 아무것도 튀지 않는다. 힘은 끌기 시작할 때만 생긴다.
+  // ★ 오므림(squeeze)은 openness 를 그대로 쓴다 — 실측 주먹 0.81 ~ 잡힘 문턱 1.15 를
+  //   [0.35, 1.0] 으로 사상. 살짝 쥐면 느슨하게 들리고 꽉 쥐면 뭉치가 조여든다. 스위치가 아니라 악력.
+  const GRAB_R = 150;          // 잡는 반경 (월드) — 손바닥 영향 반경과 같게
+  const HOLD_K_MUL = 4;        // 잡힌 점의 스프링 배수. 주먹을 또렷하게 따라오도록
+  const SLOTS = 2;             // 손 최대 2개
+  let held, hox, hoy;          // held[i]: 0=자유, s+1=슬롯 s 가 잡음 / 오프셋(월드)
+  const slotX = new Float32Array(SLOTS), slotY = new Float32Array(SLOTS), slotSq = new Float32Array(SLOTS);
+  const slotUsed = [false, false];
+  const grabbers = new Map();  // 손 id → 슬롯
+  const squeezeOf = (open) => Math.min(1, Math.max(0.35, 0.35 + (open - 0.81) * 1.91));
+
+  function releaseAll() {
+    if (held) held.fill(0);
+    grabbers.clear();
+    slotUsed[0] = slotUsed[1] = false;
+  }
+
   function build(buf) {
     const dv = new DataView(buf);
     if (String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3)) !== 'TFLD')
@@ -103,6 +127,7 @@ export function create(canvas) {
     vx = new Float32Array(N); vy = new Float32Array(N);
     seed = new Float32Array(N);
     sx = new Float32Array(N); sy = new Float32Array(N); // 화면좌표 캐시(곡선용)
+    held = new Uint8Array(N); hox = new Float32Array(N); hoy = new Float32Array(N);   // 움켜쥐기
 
     let idx = 0, src = 0;
     for (let k = 0; k < nStrokes; k++) {
@@ -175,6 +200,7 @@ export function create(canvas) {
     /** 장면을 떠날 때 — 실을 제자리로 돌려놔서 돌아왔을 때 휘저은 자국이 안 남게 */
     deactivate() {
       if (!ready) return;
+      releaseAll();
       for (let i = 0; i < N; i++) { px[i] = rx[i]; py[i] = ry[i]; vx[i] = 0; vy[i] = 0; }
       leave();
     },
@@ -225,11 +251,41 @@ export function create(canvas) {
         }
       }
 
+      // ── 움켜쥐기 갱신 ──
+      // grab 은 어트랙터의 원시 상태(_grab)와 존재감(_influence)을 함께 본다 —
+      // 손을 놓친 직후의 유지(hold) 구간에서는 잡은 채 두고, 존재감이 꺼지면 놓는다.
+      const seenGrab = new Set();
+      if (attractors) for (const a of attractors) {
+        if (a.kind !== 'palm' || !(a._grab && a._influence > 0.5)) continue;
+        const wx = (a.nx * cssW - ox) / scale;
+        const wy = (a.ny * cssH - oy) / scale;
+        let slot = grabbers.get(a._id);
+        if (slot === undefined) {                          // 잡는 순간 — 반경 안의 점을 한 번에 표시
+          slot = !slotUsed[0] ? 0 : !slotUsed[1] ? 1 : -1;
+          if (slot < 0) continue;
+          slotUsed[slot] = true; grabbers.set(a._id, slot);
+          const R2 = GRAB_R * GRAB_R, mark = slot + 1;
+          for (let i = 0; i < N; i++) {
+            const dx = px[i] - wx, dy = py[i] - wy;
+            if (dx * dx + dy * dy < R2) { held[i] = mark; hox[i] = dx; hoy[i] = dy; }
+          }
+        }
+        slotX[slot] = wx; slotY[slot] = wy; slotSq[slot] = squeezeOf(a._openness);
+        seenGrab.add(a._id);
+      }
+      for (const [id, slot] of grabbers) {
+        if (seenGrab.has(id)) continue;                    // 폈거나 손이 사라짐 → 놓기
+        const mark = slot + 1;
+        for (let i = 0; i < N; i++) if (held[i] === mark) held[i] = 0;
+        slotUsed[slot] = false; grabbers.delete(id);       // 스프링이 알아서 샤라락 복귀시킨다
+      }
+
       const t = now;
       const K = P.restK, D = P.damp;
       const PUSH = P.push, BR = P.brush, FA = P.floatAmp;
       const F1 = P.floatF1, F2 = P.floatF2;
       const _s = scale, _ox = ox, _oy = oy, _AN = AN;
+      const KH = K * HOLD_K_MUL;                           // 잡힌 점의 스프링
 
       // 감쇠는 프레임마다 곱해지는 값이라 시간에 대해 **지수**다. K60배 긴 프레임이면 D를 K60제곱해야
       // 같은 시간에 같은 만큼 줄어든다. (D * K60 처럼 곱하면 틀린다 — 그건 선형 취급이라
@@ -253,6 +309,22 @@ export function create(canvas) {
 
       // ── 물리 업데이트 ──
       for (let i = 0; i < N; i++) {
+        // 잡힌 점: 목표 = 주먹 + 오프셋×오므림. 부유도 밀어내기도 받지 않는다 —
+        // 쥐고 있는 손이 동시에 밀쳐내면 힘이 서로 싸운다.
+        const hs = held[i];
+        if (hs) {
+          const g = hs - 1;
+          const htx = slotX[g] + hox[i] * slotSq[g];
+          const hty = slotY[g] + hoy[i] * slotSq[g];
+          const nvx = (vx[i] + (htx - px[i]) * KH * K60) * DK;
+          const nvy = (vy[i] + (hty - py[i]) * KH * K60) * DK;
+          vx[i] = nvx; vy[i] = nvy;
+          const nx = px[i] + nvx * K60, ny = py[i] + nvy * K60;
+          px[i] = nx; py[i] = ny;
+          sx[i] = nx * _s + _ox; sy[i] = ny * _s + _oy;
+          continue;
+        }
+
         const s = seed[i];
         const fx = lsin(t * F1 + s) * FA + lsin(t * F2 + s * 1.7) * FA * 0.5;
         const fy = lcos(t * F1 * 1.13 + s * 1.3) * FA + lcos(t * F2 * 0.91 + s) * FA * 0.5;
@@ -343,6 +415,22 @@ export function create(canvas) {
       get N() { return N; },
       get AN() { return AN; },
       get view() { return { cssW, cssH, dpr, scale, ox, oy }; },
+      heldCount() { let c = 0; for (let i = 0; i < N; i++) if (held[i]) c++; return c; },
+      /** 잡힌 점들의 무게중심 (월드) — 주먹을 따라오는지 검증용 */
+      heldCentroid(slot = 0) {
+        let cx = 0, cy = 0, n = 0;
+        for (let i = 0; i < N; i++) if (held[i] === slot + 1) { cx += px[i]; cy += py[i]; n++; }
+        return n ? { x: cx / n, y: cy / n, n } : null;
+      },
+      /** 잡힌 점들의 퍼짐(평균 반경, 월드) — 오므림이 조이는지 검증용 */
+      heldSpread(slot = 0) {
+        const c = this.heldCentroid(slot);
+        if (!c) return null;
+        let s = 0;
+        for (let i = 0; i < N; i++) if (held[i] === slot + 1) s += Math.hypot(px[i] - c.x, py[i] - c.y);
+        return s / c.n;
+      },
+      get grabbers() { return grabbers; },
       setSkipRender: (v) => { SKIP_RENDER = v; },
       maxDisp() {
         let m = 0;
