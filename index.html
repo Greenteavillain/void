@@ -231,6 +231,17 @@
         <span class="ctl-val" id="val-spring"></span>
         <input type="range" id="ctl-spring" min="0.008" max="0.15" step="0.001">
       </label>
+
+      <!-- ── 움켜쥐기 — 당김 느낌의 다섯 레버, 각각 켜고 꺼서 비교 ──
+           잡기 방식(전파/통째)은 다음에 잡을 때부터, 나머지 셋은 잡은 채로도 즉시 적용 -->
+      <div style="margin:15px 0 4px; letter-spacing:.03em; color:rgba(255,255,255,.78);
+                  border-top:1px solid rgba(255,255,255,.12); padding-top:12px;">움켜쥐기</div>
+      <label class="ctl-check"><input type="checkbox" id="g-tension"> <span>장력 전파 — 이웃 실이 딸려옴</span></label>
+      <label class="ctl-check"><input type="checkbox" id="g-stroke"> <span>실 통째로 잡기 (켜면 위는 무시됨)</span></label>
+      <label class="ctl-check"><input type="checkbox" id="g-resist"> <span>저항 — 뭉치가 무겁게 뒤처짐</span></label>
+      <label class="ctl-check"><input type="checkbox" id="g-fist"> <span>주먹 폭 — 한 점이 아니라 한 줌</span></label>
+      <label class="ctl-check"><input type="checkbox" id="g-life"> <span>생기 — 잡힌 실도 숨쉼</span></label>
+
       <button id="panel-reset">기본값으로</button>
     </div>
   </div>
@@ -497,10 +508,21 @@ camChk.addEventListener('change', () => cam.classList.toggle('on', camChk.checke
     prevPush = P.push; prevBrush = P.brush;      // 잠그는 순간의 비율을 기준으로
   });
 
+  // ── 움켜쥐기 토글 ── 잡기 방식(전파/통째)은 다음 잡기부터, 나머지는 잡은 채로도 즉시 적용
+  const G = th.G;
+  const G_DEFAULTS = { ...G };
+  const gBoxes = [['g-tension','tension'], ['g-stroke','strokeWhole'], ['g-resist','resistance'],
+                  ['g-fist','fistWidth'], ['g-life','life']];
+  const syncG = () => { for (const [id, key] of gBoxes) $(id).checked = G[key]; };
+  syncG();
+  for (const [id, key] of gBoxes)
+    $(id).addEventListener('change', () => { G[key] = $(id).checked; });
+
   $('panel-reset').addEventListener('click', () => {
     Object.assign(P, DEFAULTS);
+    Object.assign(G, G_DEFAULTS);
     prevPush = P.push; prevBrush = P.brush;
-    sync();
+    sync(); syncG();
   });
 
   const tgl = $('panel-toggle'), body = $('panel-body');
